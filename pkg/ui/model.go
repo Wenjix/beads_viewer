@@ -31,6 +31,7 @@ const (
 	focusList focus = iota
 	focusDetail
 	focusBoard
+	focusGraph
 	focusInsights
 	focusHelp
 	focusQuitConfirm
@@ -65,6 +66,7 @@ type Model struct {
 	viewport      viewport.Model
 	renderer      *glamour.TermRenderer
 	board         BoardModel
+	graphView     GraphModel
 	insightsPanel InsightsModel
 	theme         Theme
 
@@ -77,6 +79,7 @@ type Model struct {
 	focused         focus
 	isSplitView     bool
 	isBoardView     bool
+	isGraphView     bool
 	showDetails     bool
 	showHelp        bool
 	showQuitConfirm bool
@@ -196,6 +199,7 @@ func NewModel(issues []model.Issue) Model {
 	board := NewBoardModel(issues, theme)
 	ins := graphStats.GenerateInsights(10)
 	insightsPanel := NewInsightsModel(ins, issueMap, theme)
+	graphView := NewGraphModel(issues, &ins, theme)
 
 	return Model{
 		issues:        issues,
@@ -204,6 +208,7 @@ func NewModel(issues []model.Issue) Model {
 		list:          l,
 		renderer:      renderer,
 		board:         board,
+		graphView:     graphView,
 		insightsPanel: insightsPanel,
 		theme:         theme,
 		currentFilter: "all",
@@ -276,6 +281,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.focused = focusList
 					return m, nil
 				}
+				if m.isGraphView {
+					m.isGraphView = false
+					m.focused = focusList
+					return m, nil
+				}
 				if m.isBoardView {
 					m.isBoardView = false
 					m.focused = focusList
@@ -290,6 +300,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if m.focused == focusInsights {
+					m.focused = focusList
+					return m, nil
+				}
+				if m.isGraphView {
+					m.isGraphView = false
 					m.focused = focusList
 					return m, nil
 				}
@@ -314,17 +329,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case "b":
 				m.isBoardView = !m.isBoardView
+				m.isGraphView = false
 				if m.isBoardView {
 					m.focused = focusBoard
 				} else {
 					m.focused = focusList
 				}
 
+			case "g":
+				// Toggle graph view
+				m.isGraphView = !m.isGraphView
+				m.isBoardView = false
+				if m.isGraphView {
+					m.focused = focusGraph
+				} else {
+					m.focused = focusList
+				}
+				return m, nil
+
 			case "i":
 				if m.focused == focusInsights {
 					m.focused = focusList
 				} else {
 					m.focused = focusInsights
+					m.isGraphView = false
+					m.isBoardView = false
 				}
 			}
 
@@ -335,6 +364,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case focusBoard:
 				m = m.handleBoardKeys(msg)
+
+			case focusGraph:
+				m = m.handleGraphKeys(msg)
 
 			case focusList:
 				m = m.handleListKeys(msg)
@@ -407,9 +439,9 @@ func (m Model) handleBoardKeys(msg tea.KeyMsg) Model {
 		m.board.MoveDown()
 	case "k", "up":
 		m.board.MoveUp()
-	case "g":
+	case "home":
 		m.board.MoveToTop()
-	case "G":
+	case "G", "end":
 		m.board.MoveToBottom()
 	case "ctrl+d":
 		m.board.PageDown(m.height / 3)
@@ -425,6 +457,47 @@ func (m Model) handleBoardKeys(msg tea.KeyMsg) Model {
 				}
 			}
 			m.isBoardView = false
+			m.focused = focusList
+			if m.isSplitView {
+				m.focused = focusDetail
+			} else {
+				m.showDetails = true
+			}
+			m.updateViewportContent()
+		}
+	}
+	return m
+}
+
+// handleGraphKeys handles keyboard input when the graph view is focused
+func (m Model) handleGraphKeys(msg tea.KeyMsg) Model {
+	switch msg.String() {
+	case "h", "left":
+		m.graphView.MoveLeft()
+	case "l", "right":
+		m.graphView.MoveRight()
+	case "j", "down":
+		m.graphView.MoveDown()
+	case "k", "up":
+		m.graphView.MoveUp()
+	case "ctrl+d", "pgdown":
+		m.graphView.PageDown()
+	case "ctrl+u", "pgup":
+		m.graphView.PageUp()
+	case "H":
+		m.graphView.ScrollLeft()
+	case "L":
+		m.graphView.ScrollRight()
+	case "enter":
+		if selected := m.graphView.SelectedIssue(); selected != nil {
+			// Find and select in list
+			for i, item := range m.list.Items() {
+				if issueItem, ok := item.(IssueItem); ok && issueItem.Issue.ID == selected.ID {
+					m.list.Select(i)
+					break
+				}
+			}
+			m.isGraphView = false
 			m.focused = focusList
 			if m.isSplitView {
 				m.focused = focusDetail
@@ -486,9 +559,9 @@ func (m Model) handleListKeys(msg tea.KeyMsg) Model {
 			m.showDetails = true
 			m.updateViewportContent()
 		}
-	case "g":
+	case "home":
 		m.list.Select(0)
-	case "G":
+	case "G", "end":
 		if len(m.list.Items()) > 0 {
 			m.list.Select(len(m.list.Items()) - 1)
 		}
@@ -543,6 +616,8 @@ func (m Model) View() string {
 		body = m.renderHelpOverlay()
 	} else if m.focused == focusInsights {
 		body = m.insightsPanel.View()
+	} else if m.isGraphView {
+		body = m.graphView.View(m.width, m.height-1)
 	} else if m.isBoardView {
 		body = m.board.View(m.width, m.height-1)
 	} else if m.isSplitView {
@@ -762,10 +837,25 @@ func (m Model) renderHelpOverlay() string {
 	sb.WriteString("\n")
 	views := []struct{ key, desc string }{
 		{"b", "Toggle Kanban board"},
+		{"g", "Toggle Graph view"},
 		{"i", "Toggle Insights dashboard"},
 		{"?", "Toggle this help"},
 	}
 	for _, s := range views {
+		sb.WriteString(keyStyle.Render(s.key) + descStyle.Render(s.desc) + "\n")
+	}
+
+	// Graph view keys
+	sb.WriteString("\n")
+	sb.WriteString(sectionStyle.Render("Graph View"))
+	sb.WriteString("\n")
+	graphKeys := []struct{ key, desc string }{
+		{"h/j/k/l", "Navigate nodes"},
+		{"H/L", "Scroll canvas left/right"},
+		{"PgUp/PgDn", "Scroll canvas up/down"},
+		{"Enter", "Jump to selected issue"},
+	}
+	for _, s := range graphKeys {
 		sb.WriteString(keyStyle.Render(s.key) + descStyle.Render(s.desc) + "\n")
 	}
 
@@ -866,18 +956,20 @@ func (m *Model) renderFooter() string {
 		keys = "Press any key to close help"
 	} else if m.focused == focusInsights {
 		keys = "h/l: panels • j/k: items • e: explain • x: calc • enter: jump • ?: help"
+	} else if m.isGraphView {
+		keys = "h/j/k/l: nav • H/L: scroll • enter: view • g: list • ?: help"
 	} else if m.isBoardView {
-		keys = "h/j/k/l: nav • g/G: top/bottom • enter: view • b: list • ?: help"
+		keys = "h/j/k/l: nav • G: bottom • enter: view • b: list • ?: help"
 	} else if m.list.FilterState() == list.Filtering {
 		keys = "esc: cancel • enter: select"
 	} else {
 		if m.isSplitView {
-			keys = "tab: focus • b: board • i: insights • o/r/c/a: filter • /: search • ?: help"
+			keys = "tab: focus • b: board • g: graph • i: insights • /: search • ?: help"
 		} else {
 			if m.showDetails {
 				keys = "esc: back • j/k: scroll • ?: help • q: back"
 			} else {
-				keys = "enter: details • b: board • i: insights • /: search • ?: help • q: quit"
+				keys = "enter: details • b: board • g: graph • i: insights • /: search • ?: help"
 			}
 		}
 	}
@@ -943,6 +1035,7 @@ func (m *Model) applyFilter() {
 
 	m.list.SetItems(filteredItems)
 	m.board.SetIssues(filteredIssues)
+	m.graphView.SetIssues(filteredIssues, nil) // nil insights since we use pre-computed
 
 	// Keep selection in bounds
 	if len(filteredItems) > 0 && m.list.Index() >= len(filteredItems) {
