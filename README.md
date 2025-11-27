@@ -5,6 +5,8 @@
 ![License](https://img.shields.io/github/license/Dicklesworthstone/beads_viewer?style=for-the-badge&color=50fa7b)
 ![Build Status](https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/beads_viewer/ci.yml?style=for-the-badge&logo=github)
 
+> **The elegant, keyboard-driven terminal interface for the [Beads](https://github.com/steveyegge/beads) issue tracker.**
+
 ### ⚡ Quick Install
 
 ```bash
@@ -55,41 +57,63 @@ Don't just read the title. `bv` gives you the full picture:
 
 ```mermaid
 graph TD
-    %% Pastel Theme
-    classDef data fill:#e1f5fe,stroke:#b3e5fc,stroke-width:2px,color:#0277bd
-    classDef logic fill:#fff9c4,stroke:#ffe082,stroke-width:2px,color:#fbc02d
-    classDef ui fill:#f3e5f5,stroke:#ce93d8,stroke-width:2px,color:#7b1fa2
+    %% Soft Pastel Theme — Refined
+    classDef data fill:#e3f2fd,stroke:#90caf9,stroke-width:2px,color:#1565c0,rx:8
+    classDef logic fill:#fff8e1,stroke:#ffcc80,stroke-width:2px,color:#e65100,rx:8
+    classDef ui fill:#f3e5f5,stroke:#ce93d8,stroke-width:2px,color:#6a1b9a,rx:8
+    classDef output fill:#e8f5e9,stroke:#a5d6a7,stroke-width:2px,color:#2e7d32,rx:8
 
-    subgraph "Data Layer"
-        A[".beads/beads.jsonl"]:::data
+    subgraph storage [" 📂 Data Layer "]
+        A["`.beads/beads.jsonl`<br/><small>JSONL Issue Store</small>"]:::data
     end
 
-    subgraph "Core Logic"
-        B[Loader]:::logic
-        C[Graph Analyzer]:::logic
-        D[PageRank & Metrics]:::logic
+    subgraph engine [" ⚙️ Analysis Engine "]
+        B["Loader"]:::logic
+        C["Graph Builder"]:::logic
+        D["9 Metrics<br/><small>PageRank · Betweenness · HITS...</small>"]:::logic
     end
 
-    subgraph "TUI Layer"
-        E[Bubble Tea Model]:::ui
-        F[List View]:::ui
-        G[Graph Visualizer]:::ui
-        H[Markdown Renderer]:::ui
+    subgraph interface [" 🖥️ TUI Layer "]
+        E["Bubble Tea Model"]:::ui
+        F["List View"]:::ui
+        G["Graph View"]:::ui
+        H["Insights Dashboard"]:::ui
+    end
+
+    subgraph outputs [" 📤 Outputs "]
+        I["--robot-insights<br/><small>JSON for AI Agents</small>"]:::output
+        J["--export-md<br/><small>Markdown Report</small>"]:::output
     end
 
     A --> B
     B --> C
     C --> D
     D --> E
+    D --> I
+    D --> J
     E --> F
     E --> G
     E --> H
+
+    linkStyle 0,1,2 stroke:#90caf9,stroke-width:2px
+    linkStyle 3,4,5 stroke:#ffcc80,stroke-width:2px
+    linkStyle 6,7,8 stroke:#ce93d8,stroke-width:2px
 ```
 
-### Key Metrics
-*   **PageRank:** Identifies "foundational" tasks that many others depend on.
-*   **Betweenness Centrality:** Highlights "bottleneck" tasks that bridge different parts of the system.
-*   **Critical Path:** Calculates the longest path of dependencies to find tasks that directly impact delivery time.
+### Key Metrics & Algorithms
+`bv` computes **9 graph-theoretic metrics** to surface hidden project dynamics:
+
+| # | Metric | What It Measures | Key Insight |
+|---|--------|------------------|-------------|
+| 1 | **PageRank** | Recursive dependency importance | Foundational blockers |
+| 2 | **Betweenness** | Shortest-path traffic | Bottlenecks & bridges |
+| 3 | **HITS** | Hub/Authority duality | Epics vs. utilities |
+| 4 | **Critical Path** | Longest dependency chain | Keystones with zero slack |
+| 5 | **Eigenvector** | Influence via neighbors | Strategic dependencies |
+| 6 | **Degree** | Direct connection counts | Immediate blockers/blocked |
+| 7 | **Density** | Edge-to-node ratio | Project coupling health |
+| 8 | **Cycles** | Circular dependencies | Structural errors |
+| 9 | **Topo Sort** | Valid execution order | Work queue foundation |
 
 ### 1. PageRank (Dependency Authority)
 **The Math:** Originally designed to rank web pages by "importance" based on incoming links, PageRank models a "random surfer" walking the graph. In our dependency graph ($u \rightarrow v$ implies $u$ depends on $v$), we treat dependencies as "votes" of importance.
@@ -97,15 +121,23 @@ $$
 PR(v) = \frac{1-d}{N} + d \sum_{u \in M(v)} \frac{PR(u)}{L(u)}
 $$
 
+**The Intuition:** If many tasks depend on Task A, or if a single very important Task B depends on Task A, then Task A implicitly becomes "heavy." A random walker following dependency links will frequently get stuck at Task A.
+
 **Pragmatic Meaning:** **Foundational Blocks.** High PageRank tasks are the bedrock of your project. They are rarely "features" in the user-facing sense; they are often schemas, core libraries, or architectural decisions. Breaking them breaks the graph.
 
 ### 2. Betweenness Centrality (Bottlenecks)
 **The Math:** Defined as the fraction of all shortest paths in the network that pass through a given node $v$.
 $$C_B(v) = \sum_{s \neq v \neq t} \frac{\sigma_{st}(v)}{\sigma_{st}}$$
 
-**Pragmatic Meaning:** **Gatekeepers & Bottlenecks.** A task with high Betweenness is a choke point. It might be an API contract that both the mobile app and the server team are waiting on.
+**The Intuition:** Imagine information (or progress) flowing from every task to every other task along the most efficient route. "Bridge nodes" that connect otherwise isolated clusters (e.g., the Frontend cluster and the Backend cluster) will see a massive amount of traffic.
+
+**Pragmatic Meaning:** **Gatekeepers & Bottlenecks.** A task with high Betweenness is a choke point. It might be an API contract that both the mobile app and the server team are waiting on. If this task is delayed, it doesn't just block one thread; it prevents entire sub-teams from synchronizing.
 
 ### 3. HITS (Hubs & Authorities)
+**The Math:** An iterative algorithm that defines two scores for every node:
+*   **Authority:** The sum of Hub scores of nodes pointing to it.
+*   **Hub:** The sum of Authority scores of nodes it points to.
+
 **The Intuition:** This models a "mutually reinforcing" relationship. Good libraries (Authorities) are used by many applications. Good applications (Hubs) use many good libraries.
 
 **Pragmatic Meaning:** **Epics vs. Infrastructure.**
@@ -116,7 +148,62 @@ $$C_B(v) = \sum_{s \neq v \neq t} \frac{\sigma_{st}(v)}{\sigma_{st}}$$
 **The Math:** In a DAG, the longest path represents the minimum time required to complete the project (assuming infinite parallelism). `bv` computes this recursively:
 $$Impact(u) = 1 + \max(\{Impact(v) \mid u \rightarrow v\})$$
 
+**The Intuition:** If you hold the graph by its "leaf" nodes (tasks with no dependencies) and let it dangle, the tasks at the very top that support the longest chains are carrying the most weight.
+
 **Pragmatic Meaning:** **Keystones.** A Keystone task is one where *any* delay translates 1:1 into a delay for the final project delivery. These tasks have zero "slack."
+
+### 5. Eigenvector Centrality (Influential Neighbors)
+**The Math:** Eigenvector centrality measures a node's influence by considering not just its connections, but the importance of those connections. A node with few but highly influential neighbors can score higher than a node with many unimportant neighbors.
+$$x_i = \frac{1}{\lambda} \sum_{j \in N(i)} x_j$$
+
+Where $\lambda$ is the largest eigenvalue of the adjacency matrix and $N(i)$ are neighbors of node $i$.
+
+**The Intuition:** It's not just *how many* connections you have, but *who* you're connected to. Being depended on by a critical task makes you more important than being depended on by many trivial tasks.
+
+**Pragmatic Meaning:** **Strategic Dependencies.** High Eigenvector tasks are connected to the "power players" in your graph. They may not have many direct dependents, but their dependents are themselves critical.
+
+### 6. Degree Centrality (Direct Connections)
+**The Math:** The simplest centrality measure—just count the edges.
+$$C_D^{in}(v) = |{u : u \rightarrow v}|$$
+$$C_D^{out}(v) = |{u : v \rightarrow u}|$$
+
+**The Intuition:**
+*   **In-Degree:** How many tasks depend on me? (I am a blocker)
+*   **Out-Degree:** How many tasks do I depend on? (I am blocked)
+
+**Pragmatic Meaning:** **Immediate Impact.**
+*   **High In-Degree:** This task is a direct blocker for many others. Completing it immediately unblocks work.
+*   **High Out-Degree:** This task has many prerequisites. It's likely to be blocked and should be scheduled later in the execution plan.
+
+### 7. Graph Density (Interconnectedness)
+**The Math:** Density measures how "connected" the graph is relative to its maximum possible connections.
+$$D = \frac{|E|}{|V|(|V|-1)}$$
+
+Where $|E|$ is the edge count and $|V|$ is the node count. For a directed graph, the maximum edges is $|V|(|V|-1)$.
+
+**The Intuition:** A density of 0.0 means no dependencies exist (isolated tasks). A density approaching 1.0 means everything depends on everything (pathological complexity).
+
+**Pragmatic Meaning:** **Project Health Indicator.**
+*   **Low Density (< 0.05):** Healthy. Tasks are relatively independent and can be parallelized.
+*   **Medium Density (0.05 - 0.15):** Normal. Reasonable interconnection reflecting real-world dependencies.
+*   **High Density (> 0.15):** Warning. Overly coupled project. Consider breaking into smaller modules.
+
+### 8. Cycle Detection (Circular Dependencies)
+**The Math:** A cycle in a directed graph is a path $v_1 \rightarrow v_2 \rightarrow \cdots \rightarrow v_k \rightarrow v_1$ where the start and end nodes are identical. `bv` uses Tarjan's algorithm variant via `topo.DirectedCyclesIn` to enumerate all elementary cycles.
+
+**The Intuition:** If A depends on B, and B depends on A, neither can ever be completed. This is a logical impossibility that must be resolved.
+
+**Pragmatic Meaning:** **Structural Errors.** Cycles are **bugs in your project plan**, not just warnings. They indicate:
+*   Misclassified dependencies (A doesn't really block B, or vice versa)
+*   Missing intermediate tasks (A and B both depend on an unstated C)
+*   Scope confusion (A and B should be merged into a single task)
+
+### 9. Topological Sort (Execution Order)
+**The Math:** A topological ordering of a DAG is a linear sequence of all vertices such that for every edge $u \rightarrow v$, vertex $u$ appears before $v$ in the sequence. Only acyclic graphs have valid topological orderings.
+
+**The Intuition:** If you must complete tasks in dependency order, topological sort gives you *a* valid order (there may be many).
+
+**Pragmatic Meaning:** **Work Queue.** The topological order is the foundation of `bv`'s execution planning. Combined with priority weights, it generates the "what to work on next" recommendations that power `--robot-plan`.
 
 ---
 
@@ -126,23 +213,29 @@ $$Impact(u) = 1 + \max(\{Impact(v) \mid u \rightarrow v\})$$
 
 ```mermaid
 sequenceDiagram
-    %% Pastel Theme
+    %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e8f5e9', 'primaryTextColor': '#2e7d32', 'primaryBorderColor': '#81c784', 'lineColor': '#90a4ae', 'secondaryColor': '#fff8e1', 'tertiaryColor': '#fce4ec'}}}%%
+
     participant User
-    participant Agent as AI Agent
-    participant BV as bv (Sidecar)
-    participant File as beads.jsonl
+    participant Agent as 🤖 AI Agent
+    participant BV as ⚡ bv
+    participant File as 📄 beads.jsonl
 
     User->>Agent: "Fix the next blocked task"
-    
-    rect rgb(240, 248, 255)
+
+    rect rgba(232, 245, 233, 0.4)
         Note over Agent, BV: Cognitive Offloading
-        Agent->>BV: exec `bv --robot-plan`
+        Agent->>BV: bv --robot-plan
         BV->>File: Read & Parse
-        BV->>BV: Compute Topo Sort & Critical Path
-        BV-->>Agent: JSON: { "next_actionable": "TASK-123", "reason": "Unblocks 5 items" }
+        BV->>BV: PageRank + Topo Sort
+        BV-->>Agent: { next: "TASK-123", unblocks: 5 }
     end
-    
-    Agent->>Agent: Implement Fix for TASK-123
+
+    rect rgba(255, 243, 224, 0.3)
+        Note over Agent: Implementation Phase
+        Agent->>Agent: Fix TASK-123
+        Agent->>BV: bv --robot-insights
+        BV-->>Agent: Updated graph metrics
+    end
 ```
 
 ### The "Cognitive Offloading" Strategy
@@ -155,6 +248,16 @@ If you feed an Agent raw `beads.jsonl` data, you are forcing the Agent to:
 3.  "Hallucinate" a path traversal or cycle check.
 
 `bv` solves this by providing a deterministic graph engine sidecar.
+
+### Why `bv` vs. Raw Beads?
+Using `beads` directly gives an agent *data*. Using `bv --robot-insights` gives an agent *intelligence*.
+
+| Capability | Raw Beads (JSONL) | `bv` Robot Mode |
+| :--- | :--- | :--- |
+| **Query** | "List all issues." | "List the top 5 bottlenecks blocking the release." |
+| **Context Cost** | High (Linear with issue count). | Low (Fixed summary struct). |
+| **Graph Logic** | Agent must infer/compute. | Pre-computed (PageRank/Brandes). |
+| **Safety** | Agent might miss a cycle. | Cycles explicitly flagged. |
 
 ### Agent Usage Patterns
 Agents typically use `bv` in three phases:
@@ -170,22 +273,54 @@ Agents typically use `bv` in three phases:
 3.  **Execution Planning:**
     Instead of guessing the order of operations, the agent uses `bv`'s topological sort to generate a strictly linearized plan.
 
-**JSON Output Schema:**
+**JSON Output Schema (`--robot-insights`):**
 The output is designed to be strictly typed and easily parseable by tools like `jq` or standard JSON libraries.
 ```json
 {
   "bottlenecks": [
-    { "id": "CORE-123", "value": 0.45, "desc": "High Betweenness" }
+    { "id": "CORE-123", "value": 0.45 }
   ],
   "keystones": [
-    { "id": "API-001", "value": 12.0, "desc": "High Impact Depth" }
+    { "id": "API-001", "value": 12.0 }
+  ],
+  "influencers": [
+    { "id": "AUTH-007", "value": 0.82 }
+  ],
+  "hubs": [
+    { "id": "EPIC-100", "value": 0.67 }
+  ],
+  "authorities": [
+    { "id": "UTIL-050", "value": 0.91 }
   ],
   "cycles": [
     ["TASK-A", "TASK-B", "TASK-A"]
   ],
-  "density": 0.045
+  "clusterDensity": 0.045,
+  "stats": {
+    "pageRank": { "CORE-123": 0.15, "...": "..." },
+    "betweenness": { "CORE-123": 0.45, "...": "..." },
+    "eigenvector": { "AUTH-007": 0.82, "...": "..." },
+    "hubs": { "EPIC-100": 0.67, "...": "..." },
+    "authorities": { "UTIL-050": 0.91, "...": "..." },
+    "inDegree": { "CORE-123": 5, "...": "..." },
+    "outDegree": { "CORE-123": 2, "...": "..." },
+    "criticalPathScore": { "API-001": 12.0, "...": "..." },
+    "density": 0.045,
+    "topologicalOrder": ["CORE-123", "API-001", "..."]
+  }
 }
 ```
+
+| Field | Metric | What It Contains |
+|-------|--------|------------------|
+| `bottlenecks` | Betweenness | Top nodes bridging graph clusters |
+| `keystones` | Critical Path | Top nodes on longest dependency chains |
+| `influencers` | Eigenvector | Top nodes connected to important neighbors |
+| `hubs` | HITS Hub | Top dependency aggregators (Epics) |
+| `authorities` | HITS Authority | Top prerequisite providers (Utilities) |
+| `cycles` | Cycle Detection | All circular dependency paths |
+| `clusterDensity` | Density | Overall graph interconnectedness |
+| `stats` | All Metrics | Full raw data for custom analysis |
 
 ---
 
@@ -195,32 +330,54 @@ The output is designed to be strictly typed and easily parseable by tools like `
 
 ```mermaid
 classDiagram
-    %% Pastel Theme
-    classDef model fill:#fff9c4,stroke:#ffe082,color:#fbc02d
-    classDef view fill:#f3e5f5,stroke:#ce93d8,color:#7b1fa2
-    classDef logic fill:#e0f2f1,stroke:#80cbc4,color:#00695c
+    %% Soft Pastel Theme — Refined
+    classDef model fill:#fff8e1,stroke:#ffcc80,stroke-width:2px,color:#e65100
+    classDef view fill:#f3e5f5,stroke:#ce93d8,stroke-width:2px,color:#6a1b9a
+    classDef logic fill:#e0f2f1,stroke:#80cbc4,stroke-width:2px,color:#00695c
+    classDef data fill:#e3f2fd,stroke:#90caf9,stroke-width:2px,color:#1565c0
 
     class Model:::model {
-        +[]Issue issues
-        +GraphStats analysis
-        +Update(msg)
-        +View()
+        +issues []Issue
+        +stats GraphStats
+        +insights Insights
+        +Update(msg) Model
+        +View() string
     }
 
     class LayoutEngine:::view {
-        +CalculateGeometry(width, height)
-        +RenderSplitView()
-        +RenderMobileView()
+        +width int
+        +height int
+        +CalculateGeometry()
+        +RenderSplitPane()
+        +RenderMobile()
+        +RenderUltraWide()
     }
 
     class GraphEngine:::logic {
-        +ComputePageRank()
-        +DetectCycles()
-        +TopologicalSort()
+        +PageRank() map
+        +Betweenness() map
+        +HITS() HubAuth
+        +Eigenvector() map
+        +CriticalPath() map
+        +Degree() InOut
+        +DetectCycles() [][]string
+        +TopologicalSort() []string
+        +Density() float64
     }
 
-    Model --> LayoutEngine : uses
-    Model --> GraphEngine : uses
+    class Insights:::data {
+        +Bottlenecks []Item
+        +Keystones []Item
+        +Influencers []Item
+        +Hubs []Item
+        +Authorities []Item
+        +Cycles [][]string
+        +Density float64
+    }
+
+    Model --> LayoutEngine : renders via
+    Model --> GraphEngine : analyzes with
+    GraphEngine --> Insights : produces
 ```
 
 ### 1. Adaptive Layout Engine
@@ -243,6 +400,11 @@ We built a custom 2D ASCII/Unicode rendering engine from scratch to visualize th
 *   **Canvas Abstraction:** A 2D grid of `rune` cells and `style` pointers allows us to draw "pixels" in the terminal.
 *   **Manhattan Routing:** Edges are drawn using orthogonal lines with proper Unicode corner characters ( `╭`, `─`, `╮`, `│`, `╰`, `╯`) to minimize visual noise.
 *   **Topological Layering:** Nodes are arranged in layers based on their "Impact Depth," ensuring that dependencies always flow downwards.
+
+### 4. Thematic Consistency
+We use **[Lipgloss](https://github.com/charmbracelet/lipgloss)** to enforce a strict design system.
+*   **Semantic Colors:** Colors are defined semantically (`Theme.Blocked`, `Theme.Open`) rather than hardcoded hex values. This allows `bv` to switch between "Dracula" (Dark) and "Light" modes seamlessly.
+*   **Status Indicators:** We use Nerd Font glyphs (`🐛`, `✨`, `🔥`) paired with color coding to convey status instantly without reading text.
 
 ---
 
@@ -282,6 +444,51 @@ When you press `/`, the search engine performs a **fuzzy subsequence match** aga
 *   **Example:** Typing `"steve bug"` finds bugs assigned to Steve.
 *   **Example:** Typing `"open v1.0"` filters for open items in the v1.0 release.
 
+### Performance Characteristics
+*   **Zero Allocation:** The search index is built once during the initial load (`loader.LoadIssues`).
+*   **Client-Side Filtering:** Filtering happens entirely within the render loop. There is no database latency, no network round-trip, and no "loading" spinner.
+*   **Stable Sort:** Search results maintain the topological and priority sorting of the main list, ensuring that even filtered views reflect the project's true priorities.
+
+---
+
+## 🧜 Mermaid Integration: Diagrams in the Terminal?
+
+A common question is: *"How do you render complex diagrams in a text-only terminal?"*
+
+`bv` approaches this problem in two ways:
+
+### 1. The Native Graph Visualizer (`g`)
+For the interactive TUI, we built a specialized **ASCII/Unicode Graph Engine** (`pkg/ui/graph.go`) that replicates the core value of a Mermaid flowchart without requiring graphical protocol support (like Sixel).
+*   **Topological Layering:** Nodes are automatically sorted by their dependency depth.
+*   **Orthogonal Routing:** Connections use box-drawing characters (`│`, `─`, `╭`, `╯`) to draw clean, right-angled paths that avoid crossing through node text.
+*   **Adaptive Canvas:** The virtual canvas expands infinitely, but the viewport (`pkg/ui/viewport.go`) clips rendering to exactly what fits on your screen, panning smoothly with `h`/`j`/`k`/`l`.
+
+### 2. The Export Engine (`--export-md`)
+For external reporting, `bv` includes a robust **Mermaid Generator** (`pkg/export/markdown.go`).
+*   **Sanitization:** It automatically escapes unsafe characters in issue titles to prevent syntax errors in the Mermaid parser.
+*   **Class-Based Styling:** Nodes are assigned CSS classes (`classDef open`, `classDef blocked`) based on their status, so the resulting diagram visually matches the TUI's color scheme when rendered on GitHub or GitLab.
+*   **Semantic Edges:** Blockers are rendered with thick arrows (`==>`), while loose relations use dashed lines (`-.->`), encoding the *severity* of the link into the visual syntax.
+
+```mermaid
+graph TD
+    %% Generated by bv — Soft Pastel Theme
+    classDef open fill:#c8e6c9,stroke:#81c784,stroke-width:2px,color:#2e7d32
+    classDef blocked fill:#ffcdd2,stroke:#e57373,stroke-width:2px,color:#c62828
+    classDef inProgress fill:#fff3e0,stroke:#ffb74d,stroke-width:2px,color:#ef6c00
+
+    A["CORE-123<br/>Refactor Login"]:::open
+    B["UI-456<br/>Login Page"]:::blocked
+    C["API-789<br/>Auth Endpoint"]:::inProgress
+
+    A --> B
+    A --> C
+    C -.-> B
+
+    linkStyle 0 stroke:#81c784,stroke-width:2px
+    linkStyle 1 stroke:#81c784,stroke-width:2px
+    linkStyle 2 stroke:#e57373,stroke-width:1px,stroke-dasharray:5
+```
+
 ---
 
 ## 📄 The Status Report Engine
@@ -299,6 +506,712 @@ We don't just dump JSON values. The exporter applies specific formatting rules t
 *   **Metadata Tables:** Key fields (Assignee, Priority, Status) are aligned in GFM (GitHub Flavored Markdown) tables with emoji indicators.
 *   **Conversation threading:** Comments are rendered as blockquotes (`>`) with relative timestamps, preserving the flow of discussion distinct from the technical spec.
 *   **Intelligent Sorting:** The report doesn't list issues ID-sequentially. It applies the same priority logic as the TUI: **Open Critical** issues appear first, ensuring the reader focuses on what matters now.
+
+---
+
+## ⏳ Time-Travel: Snapshot Diffing & Git History
+
+One of `bv`'s most powerful capabilities is **Time-Travel**—the ability to compare your project's state across any two points in git history. This transforms `bv` from a "viewer" into a **progress tracking and regression detection system**.
+
+### The Snapshot Model
+`bv` captures the complete state of your project at any moment:
+
+```mermaid
+graph LR
+    %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e8f5e9', 'primaryTextColor': '#2e7d32', 'primaryBorderColor': '#81c784', 'lineColor': '#90a4ae'}}}%%
+
+    subgraph "Git History"
+        A["HEAD~10<br/><small>10 commits ago</small>"]
+        B["HEAD~5<br/><small>5 commits ago</small>"]
+        C["HEAD<br/><small>Current</small>"]
+    end
+
+    subgraph "Snapshots"
+        D["Snapshot A<br/><small>45 issues, 3 cycles</small>"]
+        E["Snapshot B<br/><small>52 issues, 1 cycle</small>"]
+        F["Snapshot C<br/><small>58 issues, 0 cycles</small>"]
+    end
+
+    A --> D
+    B --> E
+    C --> F
+    D -.->|"diff"| E
+    E -.->|"diff"| F
+
+    style D fill:#ffcdd2,stroke:#e57373,stroke-width:2px
+    style E fill:#fff3e0,stroke:#ffb74d,stroke-width:2px
+    style F fill:#c8e6c9,stroke:#81c784,stroke-width:2px
+```
+
+### What Gets Tracked
+The `SnapshotDiff` captures every meaningful change:
+
+| Category | Tracked Changes |
+|----------|-----------------|
+| **Issues** | New, Closed, Reopened, Removed, Modified |
+| **Fields** | Title, Status, Priority, Tags, Dependencies |
+| **Graph** | New Cycles, Resolved Cycles |
+| **Metrics** | Δ PageRank, Δ Betweenness, Δ Density |
+
+### Git History Integration (`pkg/loader/git.go`)
+The `GitLoader` enables loading issues from **any git revision**:
+
+```go
+loader := NewGitLoader("/path/to/repo")
+
+// Load from various references
+current, _ := loader.LoadAt("HEAD")
+lastWeek, _ := loader.LoadAt("HEAD~7")
+release, _ := loader.LoadAt("v1.0.0")
+byDate, _ := loader.LoadAt("main@{2024-01-15}")
+```
+
+**Cache Architecture:**
+- Revisions are resolved to commit SHAs for stable caching
+- Thread-safe `sync.RWMutex` protects concurrent access
+- 5-minute TTL prevents stale data while avoiding redundant git calls
+
+### Use Cases
+1. **Sprint Retrospectives:** "How many issues did we close this sprint?"
+2. **Regression Detection:** "Did we accidentally reintroduce a dependency cycle?"
+3. **Trend Analysis:** "Is our graph density increasing? Are we creating too many dependencies?"
+4. **Release Notes:** "Generate a diff of all changes between v1.0 and v2.0"
+
+---
+
+## 🍳 Recipe System: Declarative View Configuration
+
+Instead of memorizing CLI flags or repeatedly setting filters, `bv` supports **Recipes**—YAML-based view configurations that can be saved, shared, and version-controlled.
+
+### Recipe Structure
+```yaml
+# .beads/recipes/sprint-review.yaml
+name: sprint-review
+description: "Issues touched in the current sprint"
+
+filters:
+  status: [open, in_progress, closed]
+  updated_after: "14d"              # Relative time: 14 days ago
+  exclude_tags: [backlog, icebox]
+
+sort:
+  field: updated
+  direction: desc
+  secondary:
+    field: priority
+    direction: asc
+
+view:
+  columns: [id, title, status, priority, updated]
+  show_metrics: true
+  max_items: 50
+
+export:
+  format: markdown
+  include_graph: true
+```
+
+### Filter Capabilities
+
+| Filter | Type | Examples |
+|--------|------|----------|
+| `status` | Array | `[open, closed, blocked, in_progress]` |
+| `priority` | Array | `[0, 1]` (P0 and P1 only) |
+| `tags` | Array | `[frontend, urgent]` |
+| `exclude_tags` | Array | `[wontfix, duplicate]` |
+| `created_after` | Relative/ISO | `"7d"`, `"2w"`, `"2024-01-01"` |
+| `updated_before` | Relative/ISO | `"30d"`, `"1m"` |
+| `actionable` | Boolean | `true` = no open blockers |
+| `has_blockers` | Boolean | `true` = waiting on dependencies |
+| `id_prefix` | String | `"bv-"` for project filtering |
+| `title_contains` | String | Substring search |
+
+### Built-in Recipes
+`bv` ships with 6 pre-configured recipes:
+
+| Recipe | Purpose |
+|--------|---------|
+| `default` | All open issues sorted by priority |
+| `actionable` | Ready to work (no blockers) |
+| `recent` | Updated in last 7 days |
+| `blocked` | Waiting on dependencies |
+| `high-impact` | Top PageRank scores |
+| `stale` | Open but untouched for 30+ days |
+
+### Using Recipes
+```bash
+# Interactive picker (press 'R' in TUI)
+bv
+
+# Direct recipe invocation
+bv --recipe actionable
+bv --recipe high-impact
+
+# Custom recipe file
+bv --recipe .beads/recipes/sprint-review.yaml
+```
+
+---
+
+## 🎯 Composite Impact Scoring
+
+Traditional issue trackers sort by a single dimension—usually priority. `bv` computes a **multi-factor Impact Score** that blends graph-theoretic metrics with temporal and priority signals.
+
+### The Scoring Formula
+$$
+\text{Impact} = 0.30 \cdot \text{PageRank} + 0.30 \cdot \text{Betweenness} + 0.20 \cdot \text{BlockerRatio} + 0.10 \cdot \text{Staleness} + 0.10 \cdot \text{PriorityBoost}
+$$
+
+### Component Breakdown
+
+| Component | Weight | What It Measures |
+|-----------|--------|------------------|
+| **PageRank** | 30% | Recursive dependency importance |
+| **Betweenness** | 30% | Bottleneck/bridge position |
+| **BlockerRatio** | 20% | Direct dependents (In-Degree) |
+| **Staleness** | 10% | Days since last update (aging) |
+| **PriorityBoost** | 10% | Human-assigned priority |
+
+### Why These Weights?
+- **60% Graph Metrics:** The structure of dependencies is the primary driver of true importance.
+- **20% Blocker Ratio:** Direct dependents matter for immediate unblocking.
+- **10% Staleness:** Old issues deserve attention; they may be forgotten blockers.
+- **10% Priority:** Human judgment is valuable but can be outdated or politically biased.
+
+### Score Output
+```json
+{
+  "issue_id": "CORE-123",
+  "title": "Refactor auth module",
+  "score": 0.847,
+  "breakdown": {
+    "pagerank": 0.27,
+    "betweenness": 0.25,
+    "blocker_ratio": 0.18,
+    "staleness": 0.07,
+    "priority_boost": 0.08
+  }
+}
+```
+
+### Priority Recommendations
+`bv` generates **actionable recommendations** when the computed impact score diverges significantly from the human-assigned priority:
+
+> ⚠️ **CORE-123** has Impact Score 0.85 but Priority P3.
+> *Reason: High PageRank (foundational dependency) + High Betweenness (bottleneck)*
+> **Recommendation:** Consider escalating to P1.
+
+### Priority Hints Overlay
+
+Press `p` in the list view to toggle **Priority Hints**—inline visual indicators showing which issues have misaligned priorities:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  OPEN     CORE-123 ⬆ Database schema migration       P3  🟢 │
+│  OPEN     UI-456     Login page styling              P2  🟢 │
+│  BLOCKED  API-789  ⬇ Legacy endpoint wrapper         P1  🔴 │
+└──────────────────────────────────────────────────────────────┘
+        ⬆ = Impact suggests higher priority (red arrow)
+        ⬇ = Impact suggests lower priority (teal arrow)
+```
+
+This provides at-a-glance feedback on whether your priority assignments match the computed graph importance.
+
+---
+
+## 🛤️ Parallel Execution Planning
+
+When you ask "What should I work on next?", `bv` doesn't just pick the highest-priority item. It generates a **complete execution plan** that respects dependencies and identifies opportunities for parallel work.
+
+### Track-Based Planning
+The planner uses **Union-Find** to identify connected components in the dependency graph, grouping related issues into independent "tracks" that can be worked on concurrently.
+
+```mermaid
+graph TD
+    %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e8f5e9', 'lineColor': '#90a4ae'}}}%%
+
+    subgraph track_a ["🅰️ Track A: Auth System"]
+        A1["AUTH-001<br/>P1 · Unblocks 3"]:::actionable
+        A2["AUTH-002"]:::blocked
+        A3["AUTH-003"]:::blocked
+    end
+
+    subgraph track_b ["🅱️ Track B: UI Polish"]
+        B1["UI-101<br/>P2 · Unblocks 1"]:::actionable
+        B2["UI-102"]:::blocked
+    end
+
+    subgraph track_c ["🅲 Track C: Independent"]
+        C1["DOCS-001<br/>P3 · Unblocks 0"]:::actionable
+    end
+
+    A1 --> A2
+    A2 --> A3
+    B1 --> B2
+
+    classDef actionable fill:#c8e6c9,stroke:#81c784,stroke-width:2px,color:#2e7d32
+    classDef blocked fill:#ffcdd2,stroke:#e57373,stroke-width:2px,color:#c62828
+
+    linkStyle 0,1,2 stroke:#81c784,stroke-width:2px
+```
+
+### Plan Output (`--robot-plan`)
+```json
+{
+  "tracks": [
+    {
+      "track_id": "track-A",
+      "reason": "Independent work stream",
+      "items": [
+        { "id": "AUTH-001", "priority": 1, "unblocks": ["AUTH-002", "AUTH-003", "API-005"] }
+      ]
+    },
+    {
+      "track_id": "track-B",
+      "reason": "Independent work stream",
+      "items": [
+        { "id": "UI-101", "priority": 2, "unblocks": ["UI-102"] }
+      ]
+    }
+  ],
+  "total_actionable": 3,
+  "total_blocked": 5,
+  "summary": {
+    "highest_impact": "AUTH-001",
+    "impact_reason": "Unblocks 3 tasks",
+    "unblocks_count": 3
+  }
+}
+```
+
+### The Algorithm
+1. **Identify Actionable Issues:** Filter to non-closed issues with no open blockers.
+2. **Compute Unblocks:** For each actionable issue, calculate what becomes unblocked if it's completed.
+3. **Find Connected Components:** Use Union-Find to group issues by their dependency relationships.
+4. **Build Tracks:** Create parallel tracks from each component, sorted by priority within each track.
+5. **Compute Summary:** Identify the single highest-impact issue (most downstream unblocks).
+
+### Benefits for AI Agents
+- **Deterministic:** Same input always produces same plan (no LLM hallucination).
+- **Parallelism-Aware:** Multiple agents can grab different tracks without conflicts.
+- **Impact-Ranked:** The `highest_impact` field tells agents exactly where to start.
+
+---
+
+## 🔬 Insights Dashboard: Interactive Graph Analysis
+
+The Insights Dashboard (`i`) transforms abstract graph metrics into an **interactive exploration interface**. Instead of just showing numbers, it lets you drill into *why* a bead scores high and *what* that means for your project.
+
+### The 6-Panel Layout
+
+```
+┌─────────────────────┬─────────────────────┬─────────────────────┐
+│  🚧 Bottlenecks     │  🏛️ Keystones       │  🌐 Influencers     │
+│  Betweenness        │  Impact Depth       │  Eigenvector        │
+│  ─────────────────  │  ─────────────────  │  ─────────────────  │
+│  ▸ 0.45 AUTH-001    │    12.0 CORE-123    │    0.82 API-007     │
+│    0.38 API-005     │    10.0 DB-001      │    0.71 AUTH-001    │
+└─────────────────────┴─────────────────────┴─────────────────────┘
+┌─────────────────────┬─────────────────────┬─────────────────────┐
+│  🛰️ Hubs            │  📚 Authorities     │  🔄 Cycles          │
+│  HITS Hub Score     │  HITS Auth Score    │  Circular Deps      │
+│  ─────────────────  │  ─────────────────  │  ─────────────────  │
+│    0.67 EPIC-100    │    0.91 UTIL-050    │  ⚠ A → B → C → A    │
+│    0.54 FEAT-200    │    0.78 LIB-010     │  ⚠ X → Y → X        │
+└─────────────────────┴─────────────────────┴─────────────────────┘
+```
+
+### Panel Descriptions
+
+| Panel | Metric | What It Shows | Actionable Insight |
+|-------|--------|---------------|-------------------|
+| **🚧 Bottlenecks** | Betweenness | Beads on many shortest paths | Prioritize to unblock parallel work |
+| **🏛️ Keystones** | Impact Depth | Deep in dependency chains | Complete first—delays cascade |
+| **🌐 Influencers** | Eigenvector | Connected to important beads | Review carefully before changes |
+| **🛰️ Hubs** | HITS Hub | Aggregate many dependencies | Track for milestone completion |
+| **📚 Authorities** | HITS Authority | Depended on by many hubs | Stabilize early—breaking ripples |
+| **🔄 Cycles** | Tarjan SCC | Circular dependency loops | Must resolve—logical impossibility |
+
+### The Detail Panel: Calculation Proofs
+
+When you select a bead, the right-side **Detail Panel** shows not just the score, but the *proof*—the actual beads and values that contributed:
+
+```
+─── CALCULATION PROOF ───
+BW(v) = Σ (σst(v) / σst) for all s≠v≠t
+
+Betweenness Score: 0.452
+
+Beads depending on this (5):
+  ↓ UI-Login: Implement login form
+  ↓ UI-Dashboard: User dashboard
+  ↓ API-Auth: Authentication endpoint
+  ... +2 more
+
+This depends on (2):
+  ↑ DB-Schema: User table migration
+  ↑ CORE-Config: Environment setup
+
+This bead lies on many shortest paths between
+other beads, making it a critical junction.
+```
+
+### Dashboard Navigation
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `Shift+Tab` | Move between panels |
+| `j` / `k` | Navigate within panel |
+| `Enter` | Focus selected bead in main view |
+| `e` | Toggle explanations |
+| `i` | Exit dashboard |
+
+---
+
+## 📋 Kanban Board: Visual Workflow State
+
+The Kanban Board (`b`) provides a **columnar workflow view** that adapts to your project's actual state—empty columns automatically collapse to maximize screen real estate.
+
+### Adaptive Column Layout
+
+```
+┌──────────────────┬──────────────────┬──────────────────┬──────────────────┐
+│  📋 OPEN (12)    │  🔄 IN PROGRESS  │  🚫 BLOCKED (3)  │  ✅ CLOSED (45)  │
+│                  │      (5)         │                  │                  │
+├──────────────────┼──────────────────┼──────────────────┼──────────────────┤
+│ ┌──────────────┐ │ ┌──────────────┐ │ ┌──────────────┐ │ ┌──────────────┐ │
+│ │ 🐛 BUG-123   │ │ │ ✨ FEAT-456  │ │ │ 🔥 CRIT-789  │ │ │ 🐛 BUG-001   │ │
+│ │ 🔥🔥🔥 P0    │ │ │ 🔥🔥 P1      │ │ │ 🔥🔥🔥 P0    │ │ │ ✓ Completed  │ │
+│ │ Fix crash    │ │ │ Add OAuth    │ │ │ Waiting on   │ │ │ Login fix    │ │
+│ │ 👤alice 🔗2  │ │ │ 👤bob 🏷️v2  │ │ │ 🔗3 blockers │ │ │ 3 days ago   │ │
+│ └──────────────┘ │ └──────────────┘ │ └──────────────┘ │ └──────────────┘ │
+│ ┌──────────────┐ │ ┌──────────────┐ │ ┌──────────────┐ │                  │
+│ │ ✨ FEAT-124  │ │ │ 🐛 BUG-457   │ │ │ ✨ FEAT-790  │ │     ↕ 1/45      │
+│ │ ...          │ │ │ ...          │ │ │ ...          │ │                  │
+└──────────────────┴──────────────────┴──────────────────┴──────────────────┘
+```
+
+### Card Anatomy
+
+Each card displays rich metadata at a glance:
+
+| Element | Meaning |
+|---------|---------|
+| **Type Icon** | 🐛 Bug, ✨ Feature, 🔥 Critical, 📝 Task |
+| **ID Badge** | Issue identifier (e.g., `BUG-123`) |
+| **Priority Flames** | 🔥🔥🔥 P0, 🔥🔥 P1, 🔥 P2, (none) P3+ |
+| **Title** | Truncated to fit card width |
+| **Metadata Row** | 👤 Assignee, 🔗 Dependency count, 🏷️ Labels |
+| **Age** | Relative time since last update |
+
+### Board Features
+
+- **Adaptive Columns:** Empty columns collapse automatically
+- **Priority Sorting:** Cards sorted by priority (P0 first), then creation date
+- **Scroll Indicators:** `↕ 3/12` shows position in long columns
+- **Status Colors:** Column headers color-coded by status
+- **Keyboard Navigation:** Full vim-style movement
+
+### Board Navigation
+
+| Key | Action |
+|-----|--------|
+| `h` / `l` | Move between columns |
+| `j` / `k` | Move within column |
+| `g` / `G` | Jump to top/bottom of column |
+| `Ctrl+D` / `Ctrl+U` | Page down/up |
+| `Enter` | Focus selected bead |
+| `b` | Exit board view |
+
+---
+
+## 🤖 Complete CLI Reference
+
+Beyond the interactive TUI, `bv` provides a comprehensive **command-line interface** for scripting, automation, and AI agent integration.
+
+### Core Commands
+
+```bash
+bv                      # Launch interactive TUI
+bv --help               # Show all options
+bv --version            # Show version
+```
+
+### Robot Protocol Commands
+
+These commands output **structured JSON** designed for programmatic consumption:
+
+| Command | Output | Use Case |
+|---------|--------|----------|
+| `--robot-insights` | Graph metrics + top N lists | Project health assessment |
+| `--robot-plan` | Actionable tracks + dependencies | Work queue generation |
+| `--robot-priority` | Priority recommendations | Automated triage |
+| `--robot-diff` | JSON diff (with `--diff-since`) | Change tracking |
+| `--robot-recipes` | Available recipe list | Recipe discovery |
+| `--robot-help` | Detailed AI agent documentation | Agent onboarding |
+
+### Time-Travel Commands
+
+```bash
+# View historical state
+bv --as-of HEAD~10              # 10 commits ago
+bv --as-of v1.0.0               # At release tag
+bv --as-of 2024-01-15           # At specific date
+bv --as-of main@{2024-01-15}    # Branch at date
+
+# Compare changes
+bv --diff-since HEAD~5          # Changes in last 5 commits
+bv --diff-since v1.0.0          # Changes since release
+bv --diff-since 2024-01-01      # Changes since date
+
+# JSON diff output
+bv --diff-since HEAD~5 --robot-diff
+```
+
+### Recipe Commands
+
+```bash
+# List available recipes
+bv --robot-recipes
+
+# Apply built-in recipes
+bv --recipe actionable          # Ready to work
+bv --recipe high-impact         # Top PageRank scores
+bv --recipe stale               # Untouched 30+ days
+bv --recipe blocked             # Waiting on dependencies
+bv -r recent                    # Short flag, updated in 7 days
+
+# Apply custom recipe
+bv --recipe .beads/recipes/sprint.yaml
+```
+
+### Export Commands
+
+```bash
+# Generate Markdown report with Mermaid diagrams
+bv --export-md report.md
+```
+
+### Example: AI Agent Workflow
+
+```bash
+#!/bin/bash
+# agent-workflow.sh - Autonomous task selection
+
+# 1. Get the execution plan
+PLAN=$(bv --robot-plan)
+
+# 2. Extract highest-impact actionable task
+TASK=$(echo "$PLAN" | jq -r '.plan.summary.highest_impact')
+
+# 3. Get full insights for context
+INSIGHTS=$(bv --robot-insights)
+
+# 4. Check if completing this introduces regressions
+BASELINE=$(bv --diff-since HEAD~1 --robot-diff)
+
+echo "Working on: $TASK"
+echo "Unblocks: $(echo "$PLAN" | jq '.plan.summary.unblocks_count') tasks"
+```
+
+### Output Examples
+
+**`--robot-priority` Output:**
+```json
+{
+  "generated_at": "2025-01-15T10:30:00Z",
+  "recommendations": [
+    {
+      "issue_id": "CORE-123",
+      "current_priority": 3,
+      "suggested_priority": 1,
+      "confidence": 0.87,
+      "direction": "increase",
+      "reasoning": "High PageRank (0.15) + High Betweenness (0.45) indicates foundational blocker"
+    }
+  ],
+  "summary": {
+    "total_issues": 58,
+    "recommendations": 12,
+    "high_confidence": 5
+  }
+}
+```
+
+**`--robot-recipes` Output:**
+```json
+{
+  "recipes": [
+    { "name": "actionable", "description": "Ready to work (no blockers)", "source": "builtin" },
+    { "name": "high-impact", "description": "Top PageRank scores", "source": "builtin" },
+    { "name": "sprint-review", "description": "Current sprint issues", "source": "project" }
+  ]
+}
+```
+
+---
+
+## 🏢 Multi-Repository Workspace Support
+
+For monorepo and multi-package architectures, `bv` provides **workspace configuration** that unifies issues across multiple repositories into a single coherent view.
+
+### Workspace Configuration (`.bv/workspace.yaml`)
+
+```yaml
+# .bv/workspace.yaml - Multi-repo workspace definition
+name: my-workspace
+
+repos:
+  - name: api
+    path: services/api
+    prefix: "api-"        # Issues become api-AUTH-123
+
+  - name: web
+    path: apps/web
+    prefix: "web-"        # Issues become web-UI-456
+
+  - name: shared
+    path: packages/shared
+    prefix: "lib-"        # Issues become lib-UTIL-789
+
+discovery:
+  enabled: true
+  patterns:
+    - "*"                 # Direct children
+    - "packages/*"        # npm/pnpm workspaces
+    - "apps/*"            # Next.js/Turborepo
+    - "services/*"        # Microservices
+    - "libs/*"            # Library packages
+  exclude:
+    - node_modules
+    - vendor
+    - .git
+  max_depth: 2
+
+defaults:
+  beads_path: .beads      # Where to find beads.jsonl in each repo
+```
+
+### ID Namespacing
+
+When working across repositories, issues are automatically namespaced:
+
+| Local ID | Repo Prefix | Namespaced ID |
+|----------|-------------|---------------|
+| `AUTH-123` | `api-` | `api-AUTH-123` |
+| `UI-456` | `web-` | `web-UI-456` |
+| `UTIL-789` | `lib-` | `lib-UTIL-789` |
+
+### Cross-Repository Dependencies
+
+The workspace system enables **cross-repo blocking relationships**:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  web-UI-456 (apps/web)                                  │
+│  "Implement OAuth login page"                           │
+│                                                         │
+│  blocks: api-AUTH-123, lib-UTIL-789                     │
+└─────────────────────────────────────────────────────────┘
+         │                      │
+         ▼                      ▼
+┌─────────────────┐    ┌─────────────────┐
+│ api-AUTH-123    │    │ lib-UTIL-789    │
+│ (services/api)  │    │ (packages/lib)  │
+│ "Auth endpoint" │    │ "Token utils"   │
+└─────────────────┘    └─────────────────┘
+```
+
+### Supported Monorepo Layouts
+
+| Layout | Pattern | Example Projects |
+|--------|---------|------------------|
+| **npm/pnpm workspaces** | `packages/*` | Lerna, Turborepo |
+| **Next.js apps** | `apps/*` | Vercel monorepos |
+| **Microservices** | `services/*` | Backend platforms |
+| **Go modules** | `modules/*` | Multi-module Go |
+| **Flat** | `*` | Simple monorepos |
+
+### ID Resolution
+
+The `IDResolver` handles cross-repo references intelligently:
+
+```go
+resolver := NewIDResolver(config, "api")
+
+// From api repo context:
+resolver.Resolve("AUTH-123")      // → {Namespace: "api-", LocalID: "AUTH-123"}
+resolver.Resolve("web-UI-456")    // → {Namespace: "web-", LocalID: "UI-456"}
+resolver.IsCrossRepo("web-UI-456") // → true
+resolver.DisplayID("api-AUTH-123") // → "AUTH-123" (local, strip prefix)
+resolver.DisplayID("web-UI-456")   // → "web-UI-456" (cross-repo, keep prefix)
+```
+
+---
+
+## ⏰ Interactive Time-Travel Mode
+
+Beyond CLI diff commands, `bv` supports **interactive time-travel** within the TUI itself. This mode overlays diff badges on your issue list, letting you visually explore what changed.
+
+### Activating Time-Travel Mode
+
+Press `T` in the main list view to enter time-travel mode. You'll be prompted for a revision:
+
+```
+┌──────────────────────────────────────────┐
+│  🕐 TIME-TRAVEL MODE                     │
+│                                          │
+│  Compare current state against:          │
+│  > HEAD~5                                │
+│                                          │
+│  Examples: HEAD~10, v1.0.0, 2024-01-15   │
+└──────────────────────────────────────────┘
+```
+
+### Diff Badges
+
+Once activated, issues display visual badges indicating their diff status:
+
+| Badge | Meaning | Color |
+|-------|---------|-------|
+| `[NEW]` | Issue created since baseline | Green |
+| `[CLOSED]` | Issue closed since baseline | Gray |
+| `[MODIFIED]` | Issue fields changed | Yellow |
+| `[REOPENED]` | Issue reopened since baseline | Orange |
+
+### Visual Example
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  📋 ISSUES (since HEAD~5)                          58 total │
+├────────────────────────────────────────────────────────────┤
+│  [NEW]      ✨ FEAT-789  Add dark mode toggle      P2  🟢  │
+│  [NEW]      🐛 BUG-456   Fix login race condition  P1  🟢  │
+│  [MODIFIED] 📝 TASK-123  Update documentation     P3  🟡  │
+│             ✨ FEAT-100  OAuth integration        P1  🟢  │
+│  [CLOSED]   🐛 BUG-001   Memory leak in parser    P0  ⚫  │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Time-Travel Summary Panel
+
+The footer shows aggregate statistics:
+
+```
+─────────────────────────────────────────────────────────────
+📊 Changes: +3 new  ✓2 closed  ~1 modified  ↺0 reopened
+Health: ↑ improving (density: -0.02, cycles: -1)
+─────────────────────────────────────────────────────────────
+```
+
+### Time-Travel Navigation
+
+| Key | Action |
+|-----|--------|
+| `T` | Enter/configure time-travel |
+| `Esc` | Exit time-travel mode |
+| `n` | Jump to next changed issue |
+| `N` | Jump to previous changed issue |
 
 ---
 
@@ -417,10 +1330,12 @@ bv
 
 | Context | Key | Action |
 | :--- | :---: | :--- |
-| **Navigation** | `j` / `k` | Next / Previous Item |
+| **Global Navigation** | `j` / `k` | Next / Previous Item |
+| | `g` / `G` | Jump to Top / Bottom |
+| | `Ctrl+D` / `Ctrl+U` | Page Down / Up |
 | | `Tab` | Switch Focus (List ↔ Details) |
 | | `Enter` | Open / Focus Selection |
-| | `q` | Quit / Back |
+| | `q` / `Esc` | Quit / Back |
 | **Filters** | `o` | Show **Open** Issues |
 | | `r` | Show **Ready** (Unblocked) |
 | | `c` | Show **Closed** Issues |
@@ -428,7 +1343,19 @@ bv
 | **Views** | `b` | Toggle **Kanban Board** |
 | | `i` | Toggle **Insights Dashboard** |
 | | `g` | Toggle **Graph Visualizer** |
+| | `a` | Toggle **Actionable Plan** |
+| **Kanban Board** | `h` / `l` | Move Between Columns |
+| | `j` / `k` | Move Within Column |
+| **Insights Dashboard** | `Tab` | Next Panel |
+| | `Shift+Tab` | Previous Panel |
+| | `e` | Toggle Explanations |
+| | `x` | Toggle Calculation Proof |
+| **Graph View** | `H` / `L` | Scroll Left / Right |
+| | `Ctrl+D` / `Ctrl+U` | Page Down / Up |
+| **Priority & Analysis** | `p` | Toggle Priority Hints Overlay |
+| | `T` | Enter Time-Travel Mode |
 | **Global** | `?` | Toggle Help Overlay |
+| | `R` | Recipe Picker |
 
 ---
 

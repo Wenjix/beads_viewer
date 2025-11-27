@@ -327,7 +327,7 @@ func main() {
 
 		// Launch TUI with historical issues
 		m := ui.NewModel(historicalIssues)
-		p := tea.NewProgram(m, tea.WithAltScreen())
+		p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 		if _, err := p.Run(); err != nil {
 			fmt.Printf("Error running beads viewer: %v\n", err)
 			os.Exit(1)
@@ -360,7 +360,7 @@ func main() {
 	m := ui.NewModel(issues)
 
 	// Run Program
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error running beads viewer: %v\n", err)
 		os.Exit(1)

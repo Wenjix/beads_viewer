@@ -472,6 +472,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case tea.MouseMsg:
+		// Handle mouse wheel scrolling
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			// Scroll up based on current focus
+			switch m.focused {
+			case focusList:
+				if m.list.Index() > 0 {
+					m.list.Select(m.list.Index() - 1)
+					// Sync detail panel in split view mode
+					if m.isSplitView {
+						m.updateViewportContent()
+					}
+				}
+			case focusDetail:
+				m.viewport.LineUp(3)
+			case focusInsights:
+				m.insightsPanel.MoveUp()
+			case focusBoard:
+				m.board.MoveUp()
+			case focusGraph:
+				m.graphView.PageUp()
+			case focusActionable:
+				m.actionableView.MoveUp()
+			}
+			return m, nil
+		case tea.MouseButtonWheelDown:
+			// Scroll down based on current focus
+			switch m.focused {
+			case focusList:
+				if m.list.Index() < len(m.list.Items())-1 {
+					m.list.Select(m.list.Index() + 1)
+					// Sync detail panel in split view mode
+					if m.isSplitView {
+						m.updateViewportContent()
+					}
+				}
+			case focusDetail:
+				m.viewport.LineDown(3)
+			case focusInsights:
+				m.insightsPanel.MoveDown()
+			case focusBoard:
+				m.board.MoveDown()
+			case focusGraph:
+				m.graphView.PageDown()
+			case focusActionable:
+				m.actionableView.MoveDown()
+			}
+			return m, nil
+		}
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -531,9 +582,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateViewportContent()
 	}
 
-	// Always update list (handles filtering input)
-	m.list, cmd = m.list.Update(msg)
-	cmds = append(cmds, cmd)
+	// Update list for filtering input, but NOT for WindowSizeMsg
+	// (we handle sizing ourselves to account for header/footer)
+	if _, isWindowSize := msg.(tea.WindowSizeMsg); !isWindowSize {
+		m.list, cmd = m.list.Update(msg)
+		cmds = append(cmds, cmd)
+	}
 
 	// Update viewport if list selection changed in split view
 	if m.isSplitView && m.focused == focusList {
@@ -811,7 +865,15 @@ func (m Model) View() string {
 	}
 
 	footer := m.renderFooter()
-	return lipgloss.JoinVertical(lipgloss.Left, body, footer)
+
+	// Ensure the final output fits exactly in the terminal height
+	// This prevents the header from being pushed off the top
+	finalStyle := lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		MaxHeight(m.height)
+
+	return finalStyle.Render(lipgloss.JoinVertical(lipgloss.Left, body, footer))
 }
 
 func (m Model) renderQuitConfirm() string {
@@ -906,7 +968,23 @@ func (m Model) renderListWithHeader() string {
 	// Page indicator line
 	pageLine := pageStyle.Render(pageInfo)
 
-	return lipgloss.JoinVertical(lipgloss.Left, headerLine, listView, pageLine)
+	// Combine all elements and force exact height
+	// bodyHeight = m.height - 1 (1 for footer)
+	bodyHeight := m.height - 1
+	if bodyHeight < 3 {
+		bodyHeight = 3
+	}
+
+	// Build content with explicit height constraint
+	// Header (1) + List + PageLine (1) must fit in bodyHeight
+	content := lipgloss.JoinVertical(lipgloss.Left, headerLine, listView, pageLine)
+
+	// Force exact height to prevent overflow
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(bodyHeight).
+		MaxHeight(bodyHeight).
+		Render(content)
 }
 
 func (m Model) renderSplitView() string {
@@ -970,12 +1048,21 @@ func (m Model) renderSplitView() string {
 
 	// Combine header + list + page indicator
 	listContent := lipgloss.JoinVertical(lipgloss.Left, header, m.list.View(), pageLine)
-	
+
 	// List Panel Width: Inner + 2 (Padding). Border adds another 2.
-	listView := listStyle.Width(listInnerWidth + 2).Height(panelHeight).Render(listContent)
+	// Use MaxHeight to ensure content doesn't overflow
+	listView := listStyle.
+		Width(listInnerWidth + 2).
+		Height(panelHeight).
+		MaxHeight(panelHeight).
+		Render(listContent)
 
 	// Detail Panel Width: Inner + 2 (Padding). Border adds another 2.
-	detailView := detailStyle.Width(m.viewport.Width + 2).Height(panelHeight).Render(m.viewport.View())
+	detailView := detailStyle.
+		Width(m.viewport.Width + 2).
+		Height(panelHeight).
+		MaxHeight(panelHeight).
+		Render(m.viewport.View())
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, listView, detailView)
 }
