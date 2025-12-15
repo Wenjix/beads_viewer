@@ -284,6 +284,9 @@ func (a *Analyzer) GenerateRecommendationsWithThresholds(thresholds Recommendati
 
 	// Sort by confidence descending
 	sort.Slice(recommendations, func(i, j int) bool {
+		if recommendations[i].Confidence == recommendations[j].Confidence {
+			return recommendations[i].IssueID < recommendations[j].IssueID
+		}
 		return recommendations[i].Confidence > recommendations[j].Confidence
 	})
 

@@ -307,8 +307,8 @@ func TestGenerateTemporalReason(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tc.activeByAuth = tt.authActive
-			confidence := tc.calculateTemporalConfidence(tt.window, tt.files, tt.pathHints)
-			got := tc.generateTemporalReason(tt.window, tt.files, tt.pathHints, confidence)
+			_ = tc.calculateTemporalConfidence(tt.window, tt.files, tt.pathHints) // Ensure confidence calc works
+			got := tc.generateTemporalReason(tt.window, tt.files, tt.pathHints)
 
 			for _, exp := range tt.expectContains {
 				if !strings.Contains(got, exp) {

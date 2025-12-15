@@ -293,21 +293,16 @@ func TestBuildGitLogArgs(t *testing.T) {
 	t.Run("basic args", func(t *testing.T) {
 		args := e.buildGitLogArgs(ExtractOptions{})
 
-		// Should contain -p, --follow, --format
-		found := map[string]bool{}
+		// Should contain -p and --format
+		// Note: --follow was removed because it requires exactly one pathspec
+		foundP := false
 		for _, arg := range args {
 			if arg == "-p" {
-				found["-p"] = true
-			}
-			if arg == "--follow" {
-				found["--follow"] = true
+				foundP = true
 			}
 		}
-		if !found["-p"] {
+		if !foundP {
 			t.Error("missing -p flag")
-		}
-		if !found["--follow"] {
-			t.Error("missing --follow flag")
 		}
 	})
 

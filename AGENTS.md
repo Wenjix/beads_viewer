@@ -16,6 +16,11 @@
   - bv --robot-priority — JSON priority recommendations with reasoning and confidence.
   - bv --robot-recipes — list recipes (default, actionable, blocked, etc.); apply via bv --recipe <name> to pre-filter/sort before other flags.
   - bv --robot-diff --diff-since <commit|date> — JSON diff of issue changes, new/closed items, and cycles introduced/resolved.
+  - **bv --robot-history** — JSON bead-to-commit correlations. Tracks which code changes relate to which beads via git history analysis. Key sections:
+    - `stats`: Summary (total beads, beads with commits, avg cycle time)
+    - `histories`: Per-bead data (events, commits, milestones, cycle_time)
+    - `commit_index`: Reverse lookup from commit SHA to bead IDs
+    - Flags: `--bead-history <id>` (filter to single bead), `--history-since <ref>` (limit to recent), `--history-limit <n>` (max commits)
 
   **Recommended workflow for agents:**
   1. Start with `bv --robot-next` for a quick "what's next?" answer

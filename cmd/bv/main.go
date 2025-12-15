@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Dicklesworthstone/beads_viewer/pkg/analysis"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/baseline"
+	"github.com/Dicklesworthstone/beads_viewer/pkg/correlation"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/drift"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/export"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/hooks"
@@ -53,6 +55,11 @@ func main() {
 	baselineInfo := flag.Bool("baseline-info", false, "Show information about the current baseline")
 	checkDrift := flag.Bool("check-drift", false, "Check for drift from baseline (exit codes: 0=OK, 1=critical, 2=warning)")
 	robotDriftCheck := flag.Bool("robot-drift", false, "Output drift check as JSON (use with --check-drift)")
+	robotHistory := flag.Bool("robot-history", false, "Output bead-to-commit correlations as JSON")
+	beadHistory := flag.String("bead-history", "", "Show history for specific bead ID")
+	historySince := flag.String("history-since", "", "Limit history to commits after this date/ref (e.g., '30 days ago', '2024-01-01')")
+	historyLimit := flag.Int("history-limit", 500, "Max commits to analyze (0 = unlimited)")
+	minConfidence := flag.Float64("min-confidence", 0.0, "Filter correlations by minimum confidence (0.0-1.0)")
 	flag.Parse()
 
 	envRobot := os.Getenv("BV_ROBOT") == "1"
@@ -120,6 +127,21 @@ func main() {
 		fmt.Println("      Minimal triage: returns only the single top recommendation.")
 		fmt.Println("      Output includes: id, title, score, reasons, claim_command, show_command")
 		fmt.Println("      Use when you just need to know \"what should I work on next?\"")
+		fmt.Println("")
+		fmt.Println("  --robot-history")
+		fmt.Println("      Outputs bead-to-commit correlations as JSON.")
+		fmt.Println("      Tracks which code changes relate to which beads via git history analysis.")
+		fmt.Println("      Key sections:")
+		fmt.Println("      - stats: Summary (total beads, beads with commits, avg cycle time)")
+		fmt.Println("      - histories: Per-bead data (events, commits, milestones, cycle_time)")
+		fmt.Println("      - commit_index: Reverse lookup from commit SHA to bead IDs")
+		fmt.Println("      Flags:")
+		fmt.Println("      - --bead-history <id>: Filter to single bead")
+		fmt.Println("      - --history-since <ref>: Limit to recent commits")
+		fmt.Println("      - --history-limit <n>: Max commits to analyze (default: 500)")
+		fmt.Println("      - --min-confidence <0.0-1.0>: Filter by minimum confidence score")
+		fmt.Println("      Example: bv --robot-history --history-since '30 days ago'")
+		fmt.Println("      Example: bv --robot-history --min-confidence 0.7")
 		fmt.Println("")
 		fmt.Println("  --export-md <file>")
 		fmt.Println("      Generates a readable status report with Mermaid.js visualizations.")
@@ -308,6 +330,9 @@ func main() {
 	if *repoFilter != "" {
 		issues = filterByRepo(issues, *repoFilter)
 	}
+
+	// Stable data hash for robot outputs (after repo filter but before recipes/TUI)
+	dataHash := analysis.ComputeDataHash(issues)
 
 	// Handle --profile-startup
 	if *profileStartup {
@@ -516,9 +541,75 @@ func main() {
 		// Generate top 50 lists for summary, but full stats are included in the struct
 		insights := stats.GenerateInsights(50)
 
+		// Optional cap for metric maps to avoid overload
+		limitMaps := func(m map[string]float64, limit int) map[string]float64 {
+			if limit <= 0 || limit >= len(m) {
+				return m
+			}
+			type kv struct {
+				k string
+				v float64
+			}
+			var items []kv
+			for k, v := range m {
+				items = append(items, kv{k, v})
+			}
+			sort.Slice(items, func(i, j int) bool {
+				if items[i].v == items[j].v {
+					return items[i].k < items[j].k
+				}
+				return items[i].v > items[j].v
+			})
+			trim := make(map[string]float64, limit)
+			for i := 0; i < limit; i++ {
+				trim[items[i].k] = items[i].v
+			}
+			return trim
+		}
+
+		// Default cap to keep payload small; allow override via env
+		mapLimit := 200
+		if v := os.Getenv("BV_INSIGHTS_MAP_LIMIT"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				mapLimit = n
+			}
+		}
+
+		fullStats := struct {
+			PageRank          map[string]float64 `json:"pagerank"`
+			Betweenness       map[string]float64 `json:"betweenness"`
+			Eigenvector       map[string]float64 `json:"eigenvector"`
+			Hubs              map[string]float64 `json:"hubs"`
+			Authorities       map[string]float64 `json:"authorities"`
+			CriticalPathScore map[string]float64 `json:"critical_path_score"`
+		}{
+			PageRank:          limitMaps(stats.PageRank(), mapLimit),
+			Betweenness:       limitMaps(stats.Betweenness(), mapLimit),
+			Eigenvector:       limitMaps(stats.Eigenvector(), mapLimit),
+			Hubs:              limitMaps(stats.Hubs(), mapLimit),
+			Authorities:       limitMaps(stats.Authorities(), mapLimit),
+			CriticalPathScore: limitMaps(stats.CriticalPathScore(), mapLimit),
+		}
+
+		output := struct {
+			GeneratedAt    string                  `json:"generated_at"`
+			DataHash       string                  `json:"data_hash"`
+			AnalysisConfig analysis.AnalysisConfig `json:"analysis_config"`
+			Status         analysis.MetricStatus   `json:"status"`
+			analysis.Insights
+			FullStats interface{} `json:"full_stats"`
+		}{
+			GeneratedAt:    time.Now().UTC().Format(time.RFC3339),
+			DataHash:       dataHash,
+			AnalysisConfig: stats.Config,
+			Status:         stats.Status(),
+			Insights:       insights,
+			FullStats:      fullStats,
+		}
+
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(insights); err != nil {
+		if err := encoder.Encode(output); err != nil {
 			fmt.Fprintf(os.Stderr, "Error encoding insights: %v\n", err)
 			os.Exit(1)
 		}
@@ -527,19 +618,28 @@ func main() {
 
 	if *robotPlan {
 		analyzer := analysis.NewAnalyzer(issues)
+		// ensure config captured for output
+		cfg := analysis.ConfigForSize(len(issues), countEdges(issues))
 		if *forceFullAnalysis {
-			cfg := analysis.FullAnalysisConfig()
-			analyzer.SetConfig(&cfg)
+			cfg = analysis.FullAnalysisConfig()
 		}
+		analyzer.SetConfig(&cfg)
 		plan := analyzer.GetExecutionPlan()
+		status := analyzer.AnalyzeAsyncWithConfig(cfg).Status() // reuse config for status snapshot
 
 		// Wrap with metadata
 		output := struct {
-			GeneratedAt string                 `json:"generated_at"`
-			Plan        analysis.ExecutionPlan `json:"plan"`
+			GeneratedAt    string                  `json:"generated_at"`
+			DataHash       string                  `json:"data_hash"`
+			AnalysisConfig analysis.AnalysisConfig `json:"analysis_config"`
+			Status         analysis.MetricStatus   `json:"status"`
+			Plan           analysis.ExecutionPlan  `json:"plan"`
 		}{
-			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-			Plan:        plan,
+			GeneratedAt:    time.Now().UTC().Format(time.RFC3339),
+			DataHash:       dataHash,
+			AnalysisConfig: cfg,
+			Status:         status,
+			Plan:           plan,
 		}
 
 		encoder := json.NewEncoder(os.Stdout)
@@ -553,10 +653,12 @@ func main() {
 
 	if *robotPriority {
 		analyzer := analysis.NewAnalyzer(issues)
+		cfg := analysis.ConfigForSize(len(issues), countEdges(issues))
 		if *forceFullAnalysis {
-			cfg := analysis.FullAnalysisConfig()
-			analyzer.SetConfig(&cfg)
+			cfg = analysis.FullAnalysisConfig()
 		}
+		analyzer.SetConfig(&cfg)
+		status := analyzer.AnalyzeAsyncWithConfig(cfg).Status()
 		recommendations := analyzer.GenerateRecommendations()
 
 		// Count high confidence recommendations
@@ -570,6 +672,9 @@ func main() {
 		// Build output with summary
 		output := struct {
 			GeneratedAt     string                            `json:"generated_at"`
+			DataHash        string                            `json:"data_hash"`
+			AnalysisConfig  analysis.AnalysisConfig           `json:"analysis_config"`
+			Status          analysis.MetricStatus             `json:"status"`
 			Recommendations []analysis.PriorityRecommendation `json:"recommendations"`
 			Summary         struct {
 				TotalIssues     int `json:"total_issues"`
@@ -578,6 +683,9 @@ func main() {
 			} `json:"summary"`
 		}{
 			GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+			DataHash:        dataHash,
+			AnalysisConfig:  cfg,
+			Status:          status,
 			Recommendations: recommendations,
 		}
 		output.Summary.TotalIssues = len(issues)
@@ -655,6 +763,88 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Handle --robot-history flag
+	if *robotHistory || *beadHistory != "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Validate repository
+		if err := correlation.ValidateRepository(cwd); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Build correlator options
+		opts := correlation.CorrelatorOptions{
+			BeadID: *beadHistory,
+			Limit:  *historyLimit,
+		}
+
+		// Parse --history-since if provided
+		if *historySince != "" {
+			since, err := recipe.ParseRelativeTime(*historySince, time.Now())
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing --history-since: %v\n", err)
+				os.Exit(1)
+			}
+			if !since.IsZero() {
+				opts.Since = &since
+			}
+		}
+
+		// Convert issues to BeadInfo for correlator
+		beadInfos := make([]correlation.BeadInfo, len(issues))
+		for i, issue := range issues {
+			beadInfos[i] = correlation.BeadInfo{
+				ID:     issue.ID,
+				Title:  issue.Title,
+				Status: string(issue.Status),
+			}
+		}
+
+		// Generate report
+		correlator := correlation.NewCorrelator(cwd)
+		report, err := correlator.GenerateReport(beadInfos, opts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error generating history report: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Apply confidence filter if specified
+		if *minConfidence > 0 {
+			scorer := correlation.NewScorer()
+			report.Histories = scorer.FilterHistoriesByConfidence(report.Histories, *minConfidence)
+
+			// Rebuild commit index after filtering
+			report.CommitIndex = make(correlation.CommitIndex)
+			for beadID, history := range report.Histories {
+				for _, commit := range history.Commits {
+					report.CommitIndex[commit.SHA] = append(report.CommitIndex[commit.SHA], beadID)
+				}
+			}
+
+			// Update stats
+			report.Stats.BeadsWithCommits = 0
+			for _, history := range report.Histories {
+				if len(history.Commits) > 0 {
+					report.Stats.BeadsWithCommits++
+				}
+			}
+		}
+
+		// Output JSON
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(report); err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding history report: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	// Handle --diff-since flag
 	if *diffSince != "" {
 		// Auto-enable robot diff for non-interactive/agent contexts
@@ -698,10 +888,14 @@ func main() {
 			output := struct {
 				GeneratedAt      string                 `json:"generated_at"`
 				ResolvedRevision string                 `json:"resolved_revision"`
+				FromDataHash     string                 `json:"from_data_hash"`
+				ToDataHash       string                 `json:"to_data_hash"`
 				Diff             *analysis.SnapshotDiff `json:"diff"`
 			}{
 				GeneratedAt:      time.Now().UTC().Format(time.RFC3339),
 				ResolvedRevision: revision,
+				FromDataHash:     analysis.ComputeDataHash(historicalIssues),
+				ToDataHash:       dataHash,
 				Diff:             diff,
 			}
 
@@ -832,6 +1026,42 @@ func main() {
 		fmt.Printf("Error running beads viewer: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// countEdges counts blocking dependencies for config sizing
+func countEdges(issues []model.Issue) int {
+	count := 0
+	for _, issue := range issues {
+		for _, dep := range issue.Dependencies {
+			if dep != nil && dep.Type == model.DepBlocks {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// parseTimeRef parses common date/time formats used for history flags.
+func parseTimeRef(s string) (time.Time, error) {
+	layouts := []string{
+		time.RFC3339,
+		"2006-01-02",
+		"2006-01-02 15:04",
+		"2006-01-02 15:04:05",
+	}
+	for _, layout := range layouts {
+		switch layout {
+		case time.RFC3339:
+			if t, err := time.Parse(layout, s); err == nil {
+				return t, nil
+			}
+		default:
+			if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+				return t, nil
+			}
+		}
+	}
+	return time.Time{}, fmt.Errorf("unable to parse time reference %q", s)
 }
 
 // printDiffSummary prints a human-readable diff summary

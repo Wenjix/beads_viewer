@@ -18,8 +18,8 @@ import (
 // Use AnalyzeWithProfile to populate this structure.
 type StartupProfile struct {
 	// Data characteristics
-	NodeCount int `json:"node_count"`
-	EdgeCount int `json:"edge_count"`
+	NodeCount int     `json:"node_count"`
+	EdgeCount int     `json:"edge_count"`
 	Density   float64 `json:"density"`
 
 	// Phase 1 timings
@@ -77,6 +77,27 @@ type GraphStats struct {
 	authorities       map[string]float64
 	criticalPathScore map[string]float64
 	cycles            [][]string
+
+	// Phase 2 status flags for robot visibility
+	status MetricStatus
+}
+
+// metricStatus captures per-metric computation outcome for transparency.
+type MetricStatus struct {
+	PageRank    statusEntry
+	Betweenness statusEntry
+	Eigenvector statusEntry
+	HITS        statusEntry
+	Critical    statusEntry
+	Cycles      statusEntry
+}
+
+// statusEntry records computation state for a single metric.
+type statusEntry struct {
+	State  string        `json:"state"`            // computed|approx|timeout|skipped
+	Reason string        `json:"reason,omitempty"` // explanation when skipped/timeout/approx
+	Sample int           `json:"sample,omitempty"` // sample size when approximate
+	MS     time.Duration `json:"ms,omitempty"`     // elapsed time
 }
 
 // IsPhase2Ready returns true if Phase 2 metrics have been computed.
@@ -84,6 +105,35 @@ func (s *GraphStats) IsPhase2Ready() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.phase2Ready
+}
+
+// Status returns a copy of metric status flags.
+func (s *GraphStats) Status() MetricStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.status
+}
+
+// stateFromTiming converts config flags/timeouts to a user-facing state string.
+func stateFromTiming(enabled bool, timedOut bool) string {
+	switch {
+	case !enabled:
+		return "skipped"
+	case timedOut:
+		return "timeout"
+	default:
+		return "computed"
+	}
+}
+
+func betweennessReason(cfg AnalysisConfig) string {
+	if cfg.BetweennessSkipReason != "" {
+		return cfg.BetweennessSkipReason
+	}
+	if cfg.BetweennessMode == BetweennessApproximate {
+		return "approximate"
+	}
+	return ""
 }
 
 // WaitForPhase2 blocks until Phase 2 computation completes.
@@ -393,6 +443,14 @@ func (a *Analyzer) AnalyzeAsyncWithConfig(config AnalysisConfig) *GraphStats {
 		hubs:              make(map[string]float64),
 		authorities:       make(map[string]float64),
 		criticalPathScore: make(map[string]float64),
+		status: MetricStatus{
+			PageRank:    statusEntry{State: "pending"},
+			Betweenness: statusEntry{State: "pending"},
+			Eigenvector: statusEntry{State: "pending"},
+			HITS:        statusEntry{State: "pending"},
+			Critical:    statusEntry{State: "pending"},
+			Cycles:      statusEntry{State: "pending"},
+		},
 	}
 
 	// Handle empty graph - mark phase 2 ready immediately
@@ -456,6 +514,7 @@ func (a *Analyzer) AnalyzeWithConfig(config AnalysisConfig) GraphStats {
 		criticalPathScore: stats.criticalPathScore,
 		cycles:            stats.cycles,
 		phase2Ready:       true,
+		status:            stats.status,
 	}
 }
 
@@ -710,7 +769,23 @@ func (a *Analyzer) computePhase2WithProfile(stats *GraphStats, config AnalysisCo
 	stats.criticalPathScore = localCriticalPath
 	stats.cycles = localCycles
 	stats.phase2Ready = true
+
+	// record status snapshot
+	stats.status = MetricStatus{
+		PageRank: statusEntry{State: stateFromTiming(config.ComputePageRank, profile.PageRankTO), MS: profile.PageRank},
+		Betweenness: statusEntry{
+			State:  stateFromTiming(config.ComputeBetweenness, profile.BetweennessTO),
+			Reason: betweennessReason(config),
+			Sample: config.BetweennessSampleSize,
+			MS:     profile.Betweenness,
+		},
+		Eigenvector: statusEntry{State: stateFromTiming(config.ComputeEigenvector, false), MS: profile.Eigenvector},
+		HITS:        statusEntry{State: stateFromTiming(config.ComputeHITS, profile.HITSTO), Reason: config.HITSSkipReason, MS: profile.HITS},
+		Critical:    statusEntry{State: stateFromTiming(config.ComputeCriticalPath, false), MS: profile.CriticalPath},
+		Cycles:      statusEntry{State: stateFromTiming(config.ComputeCycles, profile.CyclesTO), Reason: config.CyclesSkipReason, MS: profile.Cycles},
+	}
 	stats.mu.Unlock()
+	// record status outside lock to avoid holding while computePhase2WithProfile might be extended
 }
 
 // computePhase1 calculates fast metrics synchronously.
@@ -1059,7 +1134,7 @@ func computeEigenvector(g graph.Directed) map[int64]float64 {
 		}
 		for _, node := range nodeList {
 			i := index[node.ID()]
-			
+
 			// Collect and sort incoming nodes for deterministic summation
 			var incomingNodes []graph.Node
 			incoming := g.To(node.ID())

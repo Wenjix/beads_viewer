@@ -122,7 +122,7 @@ func (t *TemporalCorrelator) FindCommitsInWindow(window TemporalWindow) ([]Corre
 
 		// Calculate dynamic confidence
 		confidence := t.calculateTemporalConfidence(window, files, pathHints)
-		reason := t.generateTemporalReason(window, files, pathHints, confidence)
+		reason := t.generateTemporalReason(window, files, pathHints)
 
 		commits = append(commits, CorrelatedCommit{
 			SHA:         sha,
@@ -197,7 +197,7 @@ func (t *TemporalCorrelator) calculateTemporalConfidence(window TemporalWindow, 
 }
 
 // generateTemporalReason creates a human-readable explanation for the correlation
-func (t *TemporalCorrelator) generateTemporalReason(window TemporalWindow, files []FileChange, pathHints []string, confidence float64) string {
+func (t *TemporalCorrelator) generateTemporalReason(window TemporalWindow, files []FileChange, pathHints []string) string {
 	parts := []string{
 		fmt.Sprintf("Commit by %s during bead's active window", window.Author),
 	}

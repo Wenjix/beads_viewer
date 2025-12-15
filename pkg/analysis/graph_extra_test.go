@@ -42,7 +42,7 @@ func TestAnalyzerAnalyzeWithConfigCachesPhase2(t *testing.T) {
 	stats := a.AnalyzeWithConfig(cfg)
 	stats.WaitForPhase2()
 	if stats.NodeCount != 1 || stats.EdgeCount != 0 {
-		t.Fatalf("unexpected counts: %+v", stats)
+		t.Fatalf("unexpected counts: nodes=%d edges=%d", stats.NodeCount, stats.EdgeCount)
 	}
 	if stats.IsPhase2Ready() == false {
 		t.Fatalf("expected phase2 ready")

@@ -86,8 +86,8 @@ func (e *Extractor) Extract(opts ExtractOptions) ([]BeadEvent, error) {
 func (e *Extractor) buildGitLogArgs(opts ExtractOptions) []string {
 	args := []string{
 		"log",
-		"-p",      // Include patch/diff
-		"--follow", // Follow file renames
+		"-p",                         // Include patch/diff
+		"--follow",                   // Track renames; requires a single pathspec (handled below)
 		"--format=%H|%aI|%an|%ae|%s", // Custom format for commit info
 		"--",
 	}
@@ -103,8 +103,12 @@ func (e *Extractor) buildGitLogArgs(opts ExtractOptions) []string {
 		args = insertBefore(args, "--", fmt.Sprintf("-n%d", opts.Limit))
 	}
 
-	// Add files to track
-	args = append(args, e.beadsFiles...)
+	// Use primary beads file for follow support (git requires single pathspec with --follow)
+	primary := ".beads/beads.jsonl"
+	if len(e.beadsFiles) > 0 {
+		primary = e.beadsFiles[0]
+	}
+	args = append(args, primary)
 
 	return args
 }

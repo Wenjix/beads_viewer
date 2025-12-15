@@ -140,6 +140,9 @@ func (s *Scorer) ExplainConfidence(method CorrelationMethod, confidence float64,
 	// Determine confidence level
 	var level string
 	range_ := r.Max - r.Min
+	if range_ == 0 {
+		range_ = 1.0 // Avoid division by zero
+	}
 	normalized := (confidence - r.Min) / range_
 
 	switch {
@@ -155,7 +158,9 @@ func (s *Scorer) ExplainConfidence(method CorrelationMethod, confidence float64,
 		level = "very low"
 	}
 
-	base := fmt.Sprintf("%s confidence (%.0f%%): %s", strings.Title(level), confidence*100, r.Desc)
+	// Capitalize first letter (avoiding deprecated strings.Title)
+	levelTitle := strings.ToUpper(level[:1]) + level[1:]
+	base := fmt.Sprintf("%s confidence (%.0f%%): %s", levelTitle, confidence*100, r.Desc)
 	if details != "" {
 		base += ". " + details
 	}
