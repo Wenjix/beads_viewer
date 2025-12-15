@@ -28,6 +28,7 @@ type Theme struct {
 	// UI Elements
 	Border    lipgloss.AdaptiveColor
 	Highlight lipgloss.AdaptiveColor
+	Muted     lipgloss.AdaptiveColor
 
 	// Styles
 	Base     lipgloss.Style
@@ -59,6 +60,7 @@ func DefaultTheme(r *lipgloss.Renderer) Theme {
 
 		Border:    lipgloss.AdaptiveColor{Light: "#DDDDDD", Dark: "#44475A"},
 		Highlight: lipgloss.AdaptiveColor{Light: "#EEEEEE", Dark: "#44475A"},
+		Muted:     lipgloss.AdaptiveColor{Light: "#888888", Dark: "#6272A4"}, // Dimmed text
 	}
 
 	t.Base = r.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#000000", Dark: "#F8F8F2"})

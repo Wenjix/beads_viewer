@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/beads_viewer/pkg/analysis"
+	"github.com/Dicklesworthstone/beads_viewer/pkg/correlation"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/export"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/loader"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
@@ -48,6 +49,7 @@ const (
 	focusHelp
 	focusQuitConfirm
 	focusTimeTravelInput
+	focusHistory
 )
 
 // UpdateMsg is sent when a new version is available
@@ -121,6 +123,7 @@ type Model struct {
 	isBoardView      bool
 	isGraphView      bool
 	isActionableView bool
+	isHistoryView    bool
 	showDetails      bool
 	showHelp         bool
 	showQuitConfirm  bool
@@ -130,6 +133,9 @@ type Model struct {
 
 	// Actionable view
 	actionableView ActionableModel
+
+	// History view
+	historyView HistoryModel
 
 	// Filter state
 	currentFilter string
@@ -838,6 +844,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case focusActionable:
 				m = m.handleActionableKeys(msg)
 
+			case focusHistory:
+				m = m.handleHistoryKeys(msg)
+
 			case focusList:
 				m = m.handleListKeys(msg)
 
@@ -871,6 +880,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.graphView.PageUp()
 			case focusActionable:
 				m.actionableView.MoveUp()
+			case focusHistory:
+				m.historyView.MoveUp()
 			}
 			return m, nil
 		case tea.MouseButtonWheelDown:
@@ -894,6 +905,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.graphView.PageDown()
 			case focusActionable:
 				m.actionableView.MoveDown()
+			case focusHistory:
+				m.historyView.MoveDown()
 			}
 			return m, nil
 		}
@@ -1089,6 +1102,42 @@ func (m Model) handleActionableKeys(msg tea.KeyMsg) Model {
 	return m
 }
 
+// handleHistoryKeys handles keyboard input when history view is focused
+func (m Model) handleHistoryKeys(msg tea.KeyMsg) Model {
+	switch msg.String() {
+	case "j", "down":
+		m.historyView.MoveDown()
+	case "k", "up":
+		m.historyView.MoveUp()
+	case "tab":
+		m.historyView.ToggleFocus()
+	case "enter":
+		// Jump to selected bead in main list
+		selectedID := m.historyView.SelectedBeadID()
+		if selectedID != "" {
+			for i, item := range m.list.Items() {
+				if issueItem, ok := item.(IssueItem); ok && issueItem.Issue.ID == selectedID {
+					m.list.Select(i)
+					break
+				}
+			}
+			m.isHistoryView = false
+			m.focused = focusList
+			if m.isSplitView {
+				m.focused = focusDetail
+			} else {
+				m.showDetails = true
+			}
+			m.updateViewportContent()
+		}
+	case "H", "esc":
+		// Exit history view
+		m.isHistoryView = false
+		m.focused = focusList
+	}
+	return m
+}
+
 // handleRecipePickerKeys handles keyboard input when recipe picker is focused
 func (m Model) handleRecipePickerKeys(msg tea.KeyMsg) Model {
 	switch msg.String() {
@@ -1223,6 +1272,11 @@ func (m Model) handleListKeys(msg tea.KeyMsg) Model {
 	case "O":
 		// Open beads.jsonl in editor
 		m.openInEditor()
+	case "H":
+		// Toggle history view
+		if !m.isHistoryView {
+			m.enterHistoryView()
+		}
 	}
 	return m
 }
@@ -1277,6 +1331,9 @@ func (m Model) View() string {
 	} else if m.isActionableView {
 		m.actionableView.SetSize(m.width, m.height-2)
 		body = m.actionableView.Render()
+	} else if m.isHistoryView {
+		m.historyView.SetSize(m.width, m.height-1)
+		body = m.historyView.View()
 	} else if m.isSplitView {
 		body = m.renderSplitView()
 	} else {
@@ -1783,6 +1840,8 @@ func (m *Model) renderFooter() string {
 		keyHints = append(keyHints, keyStyle.Render("hjkl")+" nav", keyStyle.Render("G")+" bottom", keyStyle.Render("⏎")+" view", keyStyle.Render("b")+" list")
 	} else if m.isActionableView {
 		keyHints = append(keyHints, keyStyle.Render("j/k")+" nav", keyStyle.Render("⏎")+" view", keyStyle.Render("a")+" list", keyStyle.Render("?")+" help")
+	} else if m.isHistoryView {
+		keyHints = append(keyHints, keyStyle.Render("j/k")+" nav", keyStyle.Render("tab")+" focus", keyStyle.Render("⏎")+" jump", keyStyle.Render("H")+" close")
 	} else if m.list.FilterState() == list.Filtering {
 		keyHints = append(keyHints, keyStyle.Render("esc")+" cancel", keyStyle.Render("⏎")+" select")
 	} else if m.showTimeTravelPrompt {
@@ -2217,6 +2276,48 @@ func (m *Model) EnableWorkspaceMode(info WorkspaceInfo) {
 // IsWorkspaceMode returns whether workspace mode is active
 func (m Model) IsWorkspaceMode() bool {
 	return m.workspaceMode
+}
+
+// enterHistoryView loads correlation data and shows the history view
+func (m *Model) enterHistoryView() {
+	cwd, err := os.Getwd()
+	if err != nil {
+		m.statusMsg = "Cannot get working directory for history"
+		m.statusIsError = true
+		return
+	}
+
+	// Convert model.Issue to correlation.BeadInfo
+	beads := make([]correlation.BeadInfo, len(m.issues))
+	for i, issue := range m.issues {
+		beads[i] = correlation.BeadInfo{
+			ID:     issue.ID,
+			Title:  issue.Title,
+			Status: string(issue.Status),
+		}
+	}
+
+	// Load correlation data
+	correlator := correlation.NewCorrelator(cwd)
+	opts := correlation.CorrelatorOptions{
+		Limit: 500, // Reasonable limit for TUI performance
+	}
+
+	report, err := correlator.GenerateReport(beads, opts)
+	if err != nil {
+		m.statusMsg = fmt.Sprintf("History load failed: %v", err)
+		m.statusIsError = true
+		return
+	}
+
+	// Initialize or update history view
+	m.historyView = NewHistoryModel(report, m.theme)
+	m.historyView.SetSize(m.width, m.height-1)
+	m.isHistoryView = true
+	m.focused = focusHistory
+
+	m.statusMsg = fmt.Sprintf("Loaded history: %d beads with commits", report.Stats.BeadsWithCommits)
+	m.statusIsError = false
 }
 
 // enterTimeTravelMode loads historical data and computes diff
