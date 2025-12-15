@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"golang.org/x/term"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,6 +35,8 @@ func main() {
 	robotInsights := flag.Bool("robot-insights", false, "Output graph analysis and insights as JSON for AI agents")
 	robotPlan := flag.Bool("robot-plan", false, "Output dependency-respecting execution plan as JSON for AI agents")
 	robotPriority := flag.Bool("robot-priority", false, "Output priority recommendations as JSON for AI agents")
+	robotTriage := flag.Bool("robot-triage", false, "Output unified triage as JSON (the mega-command for AI agents)")
+	robotNext := flag.Bool("robot-next", false, "Output only the top pick recommendation as JSON (minimal triage)")
 	robotDiff := flag.Bool("robot-diff", false, "Output diff as JSON (use with --diff-since)")
 	robotRecipes := flag.Bool("robot-recipes", false, "Output available recipes as JSON for AI agents")
 	recipeName := flag.String("recipe", "", "Apply named recipe (e.g., triage, actionable, high-impact)")
@@ -51,6 +54,9 @@ func main() {
 	checkDrift := flag.Bool("check-drift", false, "Check for drift from baseline (exit codes: 0=OK, 1=critical, 2=warning)")
 	robotDriftCheck := flag.Bool("robot-drift", false, "Output drift check as JSON (use with --check-drift)")
 	flag.Parse()
+
+	envRobot := os.Getenv("BV_ROBOT") == "1"
+	stdoutIsTTY := term.IsTerminal(int(os.Stdout.Fd()))
 
 	// Handle -r shorthand
 	if *recipeShort != "" && *recipeName == "" {
@@ -97,6 +103,23 @@ func main() {
 		fmt.Println("      - confidence: 0-1 score indicating strength of recommendation")
 		fmt.Println("      - reasoning: Human-readable explanations for the suggestion")
 		fmt.Println("      - direction: 'increase' or 'decrease' priority")
+		fmt.Println("")
+		fmt.Println("  --robot-triage")
+		fmt.Println("      THE MEGA-COMMAND: Unified triage output combining all analysis.")
+		fmt.Println("      Single entry point for AI agents - one call gets everything needed.")
+		fmt.Println("      Key sections:")
+		fmt.Println("      - meta: Generation timestamp, data stats")
+		fmt.Println("      - quick_ref: At-a-glance summary (open/actionable/blocked counts, top 3 picks)")
+		fmt.Println("      - recommendations: Ranked actionable items with scores and reasoning")
+		fmt.Println("      - quick_wins: Low-complexity, high-impact items")
+		fmt.Println("      - blockers_to_clear: Items that unblock the most downstream work")
+		fmt.Println("      - project_health: Counts, graph metrics, overall status")
+		fmt.Println("      - commands: Copy-paste commands for common next steps")
+		fmt.Println("")
+		fmt.Println("  --robot-next")
+		fmt.Println("      Minimal triage: returns only the single top recommendation.")
+		fmt.Println("      Output includes: id, title, score, reasons, claim_command, show_command")
+		fmt.Println("      Use when you just need to know \"what should I work on next?\"")
 		fmt.Println("")
 		fmt.Println("  --export-md <file>")
 		fmt.Println("      Generates a readable status report with Mermaid.js visualizations.")
@@ -570,8 +593,78 @@ func main() {
 		os.Exit(0)
 	}
 
+	if *robotTriage || *robotNext {
+		triage := analysis.ComputeTriage(issues)
+
+		if *robotNext {
+			// Minimal output: just the top pick
+			if len(triage.QuickRef.TopPicks) == 0 {
+				output := struct {
+					GeneratedAt string `json:"generated_at"`
+					Message     string `json:"message"`
+				}{
+					GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+					Message:     "No actionable items available",
+				}
+				encoder := json.NewEncoder(os.Stdout)
+				encoder.SetIndent("", "  ")
+				if err := encoder.Encode(output); err != nil {
+					fmt.Fprintf(os.Stderr, "Error encoding robot-next: %v\n", err)
+					os.Exit(1)
+				}
+				os.Exit(0)
+			}
+
+			top := triage.QuickRef.TopPicks[0]
+			output := struct {
+				GeneratedAt string   `json:"generated_at"`
+				ID          string   `json:"id"`
+				Title       string   `json:"title"`
+				Score       float64  `json:"score"`
+				Reasons     []string `json:"reasons"`
+				Unblocks    int      `json:"unblocks"`
+				ClaimCmd    string   `json:"claim_command"`
+				ShowCmd     string   `json:"show_command"`
+			}{
+				GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+				ID:          top.ID,
+				Title:       top.Title,
+				Score:       top.Score,
+				Reasons:     top.Reasons,
+				Unblocks:    top.Unblocks,
+				ClaimCmd:    fmt.Sprintf("bd update %s --status=in_progress", top.ID),
+				ShowCmd:     fmt.Sprintf("bd show %s", top.ID),
+			}
+
+			encoder := json.NewEncoder(os.Stdout)
+			encoder.SetIndent("", "  ")
+			if err := encoder.Encode(output); err != nil {
+				fmt.Fprintf(os.Stderr, "Error encoding robot-next: %v\n", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
+
+		// Full triage output
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(triage); err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding robot-triage: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	// Handle --diff-since flag
 	if *diffSince != "" {
+		// Auto-enable robot diff for non-interactive/agent contexts
+		if !*robotDiff && (envRobot || !stdoutIsTTY) {
+			*robotDiff = true
+			if stdoutIsTTY {
+				fmt.Fprintln(os.Stderr, "Auto-enabled --robot-diff for non-interactive output; pass --robot-diff explicitly to control format.")
+			}
+		}
+
 		cwd, err := os.Getwd()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
@@ -603,11 +696,13 @@ func main() {
 		if *robotDiff {
 			// JSON output
 			output := struct {
-				GeneratedAt string                 `json:"generated_at"`
-				Diff        *analysis.SnapshotDiff `json:"diff"`
+				GeneratedAt      string                 `json:"generated_at"`
+				ResolvedRevision string                 `json:"resolved_revision"`
+				Diff             *analysis.SnapshotDiff `json:"diff"`
 			}{
-				GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-				Diff:        diff,
+				GeneratedAt:      time.Now().UTC().Format(time.RFC3339),
+				ResolvedRevision: revision,
+				Diff:             diff,
 			}
 
 			encoder := json.NewEncoder(os.Stdout)

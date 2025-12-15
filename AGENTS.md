@@ -3,11 +3,25 @@
   bv is a fast terminal UI for Beads projects (.beads/beads.jsonl). It renders lists/details and precomputes dependency metrics (PageRank, critical path, cycles, etc.) so you instantly see blockers and execution order. For agents, it’s a graph sidecar: instead of parsing JSONL or risking hallucinated traversal, call the robot flags to get deterministic, dependency-aware outputs.
 
   - bv --robot-help — shows all AI-facing commands.
+  - **bv --robot-triage** — THE MEGA-COMMAND. Single entry point for AI agents. Returns unified JSON with:
+    - `quick_ref`: at-a-glance summary (open/actionable/blocked counts, top 3 picks)
+    - `recommendations`: ranked actionable items with scores, reasons, and unblock info
+    - `quick_wins`: low-complexity, high-impact items
+    - `blockers_to_clear`: items that unblock the most downstream work
+    - `project_health`: counts by status/type/priority, graph metrics
+    - `commands`: copy-paste commands for common next steps
+  - **bv --robot-next** — Minimal triage. Returns only the single top recommendation with claim/show commands. Use when you just need "what should I work on next?"
   - bv --robot-insights — JSON graph metrics (PageRank, betweenness, HITS, critical path, cycles) with top-N summaries for quick triage.
   - bv --robot-plan — JSON execution plan: parallel tracks, items per track, and unblocks lists showing what each item frees up.
   - bv --robot-priority — JSON priority recommendations with reasoning and confidence.
   - bv --robot-recipes — list recipes (default, actionable, blocked, etc.); apply via bv --recipe <name> to pre-filter/sort before other flags.
   - bv --robot-diff --diff-since <commit|date> — JSON diff of issue changes, new/closed items, and cycles introduced/resolved.
+
+  **Recommended workflow for agents:**
+  1. Start with `bv --robot-next` for a quick "what's next?" answer
+  2. Use `bv --robot-triage` for comprehensive context when planning
+  3. Use `bv --robot-plan` for parallel work partitioning
+  4. Use `bv --robot-insights` when you need deep graph analysis
 
   Use these commands instead of hand-rolling graph logic; bv already computes the hard parts so agents can act safely and quickly.
 
