@@ -1063,25 +1063,22 @@ func (a *Analyzer) computeSlack() map[string]float64 {
 		distToEnd[id] = 0
 	}
 
-	// Map for quick node lookup
-	forwardDeps := func(id string) []int64 {
+	// Helper for prerequisites (g.From) - items this node depends on
+	prereqDeps := func(id string) []int64 {
 		nID := a.idToNode[id]
-		// In our graph, u -> v means u depends on v.
-		// g.To(nID) returns nodes that nID depends on (prerequisites/dependencies).
-		// Note: The variable naming in the loop below (distFromStart) implies calculating
-		// depth from the "start" of the dependency chain (leaf nodes), which works
-		// because we iterate the topological order (Dependent -> Prerequisite).
-		to := a.g.To(nID)
+		from := a.g.From(nID)
 		var res []int64
-		for to.Next() {
-			res = append(res, to.Node().ID())
+		for from.Next() {
+			res = append(res, from.Node().ID())
 		}
 		return res
 	}
 
-	// Forward pass: longest distance from any start to each node (using dependents)
-	for _, id := range order {
-		for _, dep := range forwardDeps(id) {
+	// Forward pass: longest distance from any start to each node
+	// Propagate from u to v (u -> v): dist[v] = max(dist[v], dist[u] + 1)
+	for i := len(order) - 1; i >= 0; i-- {
+		id := order[i]
+		for _, dep := range prereqDeps(id) {
 			depID := a.nodeToID[dep]
 			if distFromStart[depID] < distFromStart[id]+1 {
 				distFromStart[depID] = distFromStart[id] + 1
@@ -1089,10 +1086,10 @@ func (a *Analyzer) computeSlack() map[string]float64 {
 		}
 	}
 
-	// Reverse pass: longest distance from node to any end (using dependents)
-	for i := len(order) - 1; i >= 0; i-- {
-		id := order[i]
-		for _, dep := range forwardDeps(id) {
+	// Reverse pass: longest distance from node to any end
+	// Propagate from v to u (u -> v): dist[u] = max(dist[u], dist[v] + 1)
+	for _, id := range order {
+		for _, dep := range prereqDeps(id) {
 			depID := a.nodeToID[dep]
 			if distToEnd[id] < distToEnd[depID]+1 {
 				distToEnd[id] = distToEnd[depID] + 1
@@ -1202,7 +1199,7 @@ func findArticulationPoints(g *simple.UndirectedGraph) map[int64]bool {
 				parent[u] = v
 				childCount++
 				dfs(u)
-				low[v] = minInt(low[v], low[u])
+				low[v] = min(low[v], low[u])
 
 				// Root with >1 child OR low[u] >= disc[v]
 				if parent[v] == noParent && childCount > 1 {
@@ -1212,7 +1209,7 @@ func findArticulationPoints(g *simple.UndirectedGraph) map[int64]bool {
 					ap[v] = true
 				}
 			} else if u != parent[v] {
-				low[v] = minInt(low[v], disc[u])
+				low[v] = min(low[v], disc[u])
 			}
 		}
 	}
@@ -1345,37 +1342,47 @@ func computeEigenvector(g graph.Directed) map[int64]float64 {
 		return nodeList[i].ID() < nodeList[j].ID()
 	})
 
+	// Pre-calculate and sort incoming neighbors for every node
+	// This avoids allocating and sorting inside the hot loop
+	incomingMap := make(map[int64][]int, n)
+	index := make(map[int64]int, n)
+	for i, node := range nodeList {
+		index[node.ID()] = i
+	}
+
+	for _, node := range nodeList {
+		var neighbors []graph.Node
+		incoming := g.To(node.ID())
+		for incoming.Next() {
+			neighbors = append(neighbors, incoming.Node())
+		}
+		// Deterministic order for summation
+		sort.Slice(neighbors, func(a, b int) bool {
+			return neighbors[a].ID() < neighbors[b].ID()
+		})
+
+		// Store indices directly to avoid map lookups in loop
+		indices := make([]int, len(neighbors))
+		for k, neighbor := range neighbors {
+			indices[k] = index[neighbor.ID()]
+		}
+		incomingMap[node.ID()] = indices
+	}
+
 	vec := make([]float64, n)
 	for i := range vec {
 		vec[i] = 1.0 / float64(n)
 	}
 	work := make([]float64, n)
 
-	index := make(map[int64]int, n)
-	for i, node := range nodeList {
-		index[node.ID()] = i
-	}
-
 	const iterations = 50
 	for iter := 0; iter < iterations; iter++ {
 		for i := range work {
 			work[i] = 0
 		}
-		for _, node := range nodeList {
-			i := index[node.ID()]
-
-			// Collect and sort incoming nodes for deterministic summation
-			var incomingNodes []graph.Node
-			incoming := g.To(node.ID())
-			for incoming.Next() {
-				incomingNodes = append(incomingNodes, incoming.Node())
-			}
-			sort.Slice(incomingNodes, func(a, b int) bool {
-				return incomingNodes[a].ID() < incomingNodes[b].ID()
-			})
-
-			for _, neighbor := range incomingNodes {
-				j := index[neighbor.ID()]
+		for i, node := range nodeList {
+			// Use pre-calculated sorted indices
+			for _, j := range incomingMap[node.ID()] {
 				work[i] += vec[j]
 			}
 		}

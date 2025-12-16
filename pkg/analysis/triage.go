@@ -20,6 +20,11 @@ type TriageResult struct {
 	ProjectHealth   ProjectHealth    `json:"project_health"`
 	Alerts          []Alert          `json:"alerts,omitempty"`
 	Commands        CommandHelpers   `json:"commands"`
+
+	// bv-87: Track/label-aware groupings for multi-agent coordination
+	// These allow multiple agents to grab their own top-N without collision
+	RecommendationsByTrack []TrackRecommendationGroup `json:"recommendations_by_track,omitempty"`
+	RecommendationsByLabel []LabelRecommendationGroup `json:"recommendations_by_label,omitempty"`
 }
 
 // TriageMeta contains metadata about the triage computation
@@ -275,6 +280,29 @@ type TriageOptions struct {
 	QuickWinN     int  // Number of quick wins (default 5)
 	BlockerN      int  // Number of blockers to show (default 5)
 	WaitForPhase2 bool // Block until Phase 2 metrics ready
+
+	// bv-87: Track/label-aware recommendation grouping for multi-agent coordination
+	GroupByTrack bool // Group recommendations by execution track (connected component)
+	GroupByLabel bool // Group recommendations by primary label
+}
+
+// TrackRecommendationGroup groups recommendations by execution track (bv-87)
+type TrackRecommendationGroup struct {
+	TrackID         string           `json:"track_id"`
+	Reason          string           `json:"reason"`                     // Why these are grouped (e.g., "Independent work stream")
+	Recommendations []Recommendation `json:"recommendations"`            // Recommendations in this track
+	TopPick         *TopPick         `json:"top_pick,omitempty"`         // Best item in this track
+	ClaimCommand    string           `json:"claim_command,omitempty"`    // bd update <top_pick_id> --status=in_progress
+	TotalUnblocks   int              `json:"total_unblocks"`             // Sum of unblocks in this track
+}
+
+// LabelRecommendationGroup groups recommendations by label (bv-87)
+type LabelRecommendationGroup struct {
+	Label           string           `json:"label"`
+	Recommendations []Recommendation `json:"recommendations"`            // Recommendations with this label
+	TopPick         *TopPick         `json:"top_pick,omitempty"`         // Best item with this label
+	ClaimCommand    string           `json:"claim_command,omitempty"`    // bd update <top_pick_id> --status=in_progress
+	TotalUnblocks   int              `json:"total_unblocks"`             // Sum of unblocks for this label
 }
 
 // ComputeTriageWithOptions generates triage with custom options
@@ -341,6 +369,16 @@ func ComputeTriageWithOptionsAndTime(issues []model.Issue, opts TriageOptions, n
 	elapsed := time.Since(start)
 	projectVelocity := computeProjectVelocity(issues, now.UTC(), 8)
 
+	// bv-87: Build grouped recommendations if requested
+	var recsByTrack []TrackRecommendationGroup
+	var recsByLabel []LabelRecommendationGroup
+	if opts.GroupByTrack {
+		recsByTrack = buildRecommendationsByTrack(recommendations, analyzer, unblocksMap)
+	}
+	if opts.GroupByLabel {
+		recsByLabel = buildRecommendationsByLabel(recommendations, unblocksMap)
+	}
+
 	return TriageResult{
 		Meta: TriageMeta{
 			Version:       "1.0.0",
@@ -356,9 +394,11 @@ func ComputeTriageWithOptionsAndTime(issues []model.Issue, opts TriageOptions, n
 			InProgressCount: counts.ByStatus["in_progress"],
 			TopPicks:        topPicks,
 		},
-		Recommendations: recommendations,
-		QuickWins:       quickWins,
-		BlockersToClear: blockersToClear,
+		Recommendations:        recommendations,
+		QuickWins:              quickWins,
+		BlockersToClear:        blockersToClear,
+		RecommendationsByTrack: recsByTrack,
+		RecommendationsByLabel: recsByLabel,
 		ProjectHealth: ProjectHealth{
 			Counts:   counts,
 			Graph:    buildGraphHealth(stats),
@@ -1168,4 +1208,115 @@ func EnhanceRecommendationWithTriageReasons(rec *Recommendation, triageReasons T
 	}
 	// Replace base reasons with enhanced triage reasons
 	rec.Reasons = triageReasons.All
+}
+
+// buildRecommendationsByTrack groups recommendations by execution track
+func buildRecommendationsByTrack(recs []Recommendation, analyzer *Analyzer, unblocksMap map[string][]string) []TrackRecommendationGroup {
+	// reuse plan logic to get tracks
+	plan := analyzer.GetExecutionPlan()
+
+	// map issue -> track
+	issueTrack := make(map[string]string)
+	trackReasons := make(map[string]string)
+
+	for _, t := range plan.Tracks {
+		trackReasons[t.TrackID] = t.Reason
+		for _, item := range t.Items {
+			issueTrack[item.ID] = t.TrackID
+		}
+	}
+
+	groups := make(map[string]*TrackRecommendationGroup)
+
+	for _, rec := range recs {
+		trackID, ok := issueTrack[rec.ID]
+		if !ok {
+			trackID = "ungrouped"
+		}
+
+		if _, exists := groups[trackID]; !exists {
+			reason := trackReasons[trackID]
+			if trackID == "ungrouped" {
+				reason = "Issues not in actionable plan"
+			}
+			groups[trackID] = &TrackRecommendationGroup{
+				TrackID: trackID,
+				Reason:  reason,
+			}
+		}
+		group := groups[trackID]
+		group.Recommendations = append(group.Recommendations, rec)
+		group.TotalUnblocks += len(unblocksMap[rec.ID])
+
+		// update top pick logic (highest score)
+		if group.TopPick == nil || rec.Score > group.TopPick.Score {
+			group.TopPick = &TopPick{
+				ID:       rec.ID,
+				Title:    rec.Title,
+				Score:    rec.Score,
+				Reasons:  rec.Reasons,
+				Unblocks: len(unblocksMap[rec.ID]),
+			}
+			if rec.Action == "work" || rec.Action == "unblock" {
+				group.ClaimCommand = fmt.Sprintf("bd update %s --status=in_progress", rec.ID)
+			}
+		}
+	}
+
+	// Convert map to slice and sort
+	var result []TrackRecommendationGroup
+	for _, g := range groups {
+		result = append(result, *g)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].TrackID < result[j].TrackID
+	})
+
+	return result
+}
+
+// buildRecommendationsByLabel groups recommendations by label
+func buildRecommendationsByLabel(recs []Recommendation, unblocksMap map[string][]string) []LabelRecommendationGroup {
+	groups := make(map[string]*LabelRecommendationGroup)
+
+	for _, rec := range recs {
+		label := "unlabeled"
+		if len(rec.Labels) > 0 {
+			label = rec.Labels[0] // Primary label
+		}
+
+		if _, exists := groups[label]; !exists {
+			groups[label] = &LabelRecommendationGroup{
+				Label: label,
+			}
+		}
+		group := groups[label]
+		group.Recommendations = append(group.Recommendations, rec)
+		group.TotalUnblocks += len(unblocksMap[rec.ID])
+
+		if group.TopPick == nil || rec.Score > group.TopPick.Score {
+			group.TopPick = &TopPick{
+				ID:       rec.ID,
+				Title:    rec.Title,
+				Score:    rec.Score,
+				Reasons:  rec.Reasons,
+				Unblocks: len(unblocksMap[rec.ID]),
+			}
+			if rec.Action == "work" || rec.Action == "unblock" {
+				group.ClaimCommand = fmt.Sprintf("bd update %s --status=in_progress", rec.ID)
+			}
+		}
+	}
+
+	var result []LabelRecommendationGroup
+	for _, g := range groups {
+		result = append(result, *g)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Label < result[j].Label
+	})
+
+	return result
 }

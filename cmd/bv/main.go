@@ -26,6 +26,7 @@ import (
 	"github.com/Dicklesworthstone/beads_viewer/pkg/loader"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/recipe"
+	"github.com/Dicklesworthstone/beads_viewer/pkg/search"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/ui"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/updater"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/version"
@@ -48,6 +49,8 @@ func main() {
 	robotPlan := flag.Bool("robot-plan", false, "Output dependency-respecting execution plan as JSON for AI agents")
 	robotPriority := flag.Bool("robot-priority", false, "Output priority recommendations as JSON for AI agents")
 	robotTriage := flag.Bool("robot-triage", false, "Output unified triage as JSON (the mega-command for AI agents)")
+	robotTriageByTrack := flag.Bool("robot-triage-by-track", false, "Group triage recommendations by execution track (bv-87)")
+	robotTriageByLabel := flag.Bool("robot-triage-by-label", false, "Group triage recommendations by label (bv-87)")
 	robotNext := flag.Bool("robot-next", false, "Output only the top pick recommendation as JSON (minimal triage)")
 	robotDiff := flag.Bool("robot-diff", false, "Output diff as JSON (use with --diff-since)")
 	robotRecipes := flag.Bool("robot-recipes", false, "Output available recipes as JSON for AI agents")
@@ -73,6 +76,9 @@ func main() {
 	alertLabel := flag.String("alert-label", "", "Filter robot alerts by label match")
 	recipeName := flag.String("recipe", "", "Apply named recipe (e.g., triage, actionable, high-impact)")
 	recipeShort := flag.String("r", "", "Shorthand for --recipe")
+	semanticQuery := flag.String("search", "", "Semantic search query (vector-based; builds/updates index on first run)")
+	robotSearch := flag.Bool("robot-search", false, "Output semantic search results as JSON for AI agents (use with --search)")
+	searchLimit := flag.Int("search-limit", 10, "Max results for --search/--robot-search")
 	diffSince := flag.String("diff-since", "", "Show changes since historical point (commit SHA, branch, tag, or date)")
 	asOf := flag.String("as-of", "", "View state at point in time (commit SHA, branch, tag, or date)")
 	forceFullAnalysis := flag.Bool("force-full-analysis", false, "Compute all metrics regardless of graph size (may be slow for large graphs)")
@@ -196,6 +202,11 @@ func main() {
 		fmt.Println("      Minimal triage: returns only the single top recommendation.")
 		fmt.Println("      Output includes: id, title, score, reasons, claim_command, show_command")
 		fmt.Println("      Use when you just need to know \"what should I work on next?\"")
+		fmt.Println("")
+		fmt.Println("  --search \"query\" [--robot-search]")
+		fmt.Println("      Semantic vector search over issue titles/descriptions.")
+		fmt.Println("      Builds/updates a local on-disk vector index on first run.")
+		fmt.Println("      Use --robot-search to emit JSON for automation.")
 		fmt.Println("")
 		fmt.Println("  --emit-script [--script-limit=N]")
 		fmt.Println("      Emits a shell script for top-N recommendations (default: 5).")
@@ -703,6 +714,134 @@ func main() {
 				}
 			}
 		}
+	}
+
+	// Handle semantic search CLI (bv-9gf.3)
+	if *robotSearch && *semanticQuery == "" {
+		fmt.Fprintln(os.Stderr, "Error: --robot-search requires --search \"query\"")
+		os.Exit(1)
+	}
+	if *semanticQuery != "" {
+		cfg := search.EmbeddingConfigFromEnv()
+		embedder, err := search.NewEmbedderFromConfig(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		projectDir, _ := os.Getwd()
+		indexPath := search.DefaultIndexPath(projectDir, cfg)
+		idx, loaded, err := search.LoadOrNewVectorIndex(indexPath, embedder.Dim())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		docs := search.DocumentsFromIssues(issues)
+		if !*robotSearch && !loaded {
+			fmt.Fprintf(os.Stderr, "Building semantic index (%d issues)...\n", len(docs))
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		syncStats, err := search.SyncVectorIndex(ctx, idx, embedder, docs, 64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error building semantic index: %v\n", err)
+			os.Exit(1)
+		}
+		if !loaded || syncStats.Changed() {
+			if err := idx.Save(indexPath); err != nil {
+				fmt.Fprintf(os.Stderr, "Error saving semantic index: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		qvecs, err := embedder.Embed(ctx, []string{*semanticQuery})
+		if err != nil || len(qvecs) != 1 {
+			if err == nil {
+				err = fmt.Errorf("embedder returned %d vectors for query", len(qvecs))
+			}
+			fmt.Fprintf(os.Stderr, "Error embedding query: %v\n", err)
+			os.Exit(1)
+		}
+
+		limit := *searchLimit
+		if limit <= 0 {
+			limit = 10
+		}
+		results, err := idx.SearchTopK(qvecs[0], limit)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error searching index: %v\n", err)
+			os.Exit(1)
+		}
+
+		titleByID := make(map[string]string, len(issues))
+		for _, iss := range issues {
+			titleByID[iss.ID] = iss.Title
+		}
+
+		if *robotSearch {
+			type resultRow struct {
+				IssueID string  `json:"issue_id"`
+				Score   float64 `json:"score"`
+				Title   string  `json:"title,omitempty"`
+			}
+			out := struct {
+				GeneratedAt string              `json:"generated_at"`
+				DataHash    string              `json:"data_hash"`
+				Query       string              `json:"query"`
+				Provider    search.Provider     `json:"provider"`
+				Model       string              `json:"model,omitempty"`
+				Dim         int                 `json:"dim"`
+				IndexPath   string              `json:"index_path"`
+				Index       search.IndexSyncStats `json:"index"`
+				Loaded      bool                `json:"loaded"`
+				Limit       int                 `json:"limit"`
+				Results     []resultRow         `json:"results"`
+				UsageHints  []string            `json:"usage_hints"`
+			}{
+				GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+				DataHash:    dataHash,
+				Query:       *semanticQuery,
+				Provider:    cfg.Provider,
+				Model:       cfg.Model,
+				Dim:         embedder.Dim(),
+				IndexPath:   indexPath,
+				Index:       syncStats,
+				Loaded:      loaded,
+				Limit:       limit,
+				UsageHints: []string{
+					"jq '.results[] | {id: .issue_id, score: .score, title: .title}' - Extract results",
+					"jq '.index' - Index update stats (added/updated/removed/embedded)",
+				},
+			}
+			out.Results = make([]resultRow, 0, len(results))
+			for _, r := range results {
+				out.Results = append(out.Results, resultRow{
+					IssueID: r.IssueID,
+					Score:   r.Score,
+					Title:   titleByID[r.IssueID],
+				})
+			}
+
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(out); err != nil {
+				fmt.Fprintf(os.Stderr, "Error encoding robot-search: %v\n", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
+
+		// Human-readable output
+		if !loaded || syncStats.Changed() {
+			fmt.Fprintf(os.Stderr, "Index: +%d ~%d -%d (%d total) → %s\n", syncStats.Added, syncStats.Updated, syncStats.Removed, idx.Size(), indexPath)
+		}
+		for _, r := range results {
+			fmt.Printf("%.4f\t%s\t%s\n", r.Score, r.IssueID, titleByID[r.IssueID])
+		}
+		os.Exit(0)
 	}
 
 	// Handle --pages wizard (bv-10g)
@@ -1646,8 +1785,13 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *robotTriage || *robotNext {
-		triage := analysis.ComputeTriage(issues)
+	if *robotTriage || *robotNext || *robotTriageByTrack || *robotTriageByLabel {
+		// bv-87: Support track/label-aware grouping for multi-agent coordination
+		opts := analysis.TriageOptions{
+			GroupByTrack: *robotTriageByTrack,
+			GroupByLabel: *robotTriageByLabel,
+		}
+		triage := analysis.ComputeTriageWithOptions(issues, opts)
 
 		if *robotNext {
 			// Minimal output: just the top pick
@@ -1715,6 +1859,10 @@ func main() {
 				"jq '.triage.categories.bugs' - Bug-specific triage",
 				"jq '.triage.quick_ref.top_picks[] | select(.unblocks > 2)' - High-impact picks",
 				"--robot-next - Get only the single top recommendation",
+				"--robot-triage-by-track - Group by execution track for multi-agent coordination",
+				"--robot-triage-by-label - Group by label for area-focused agents",
+				"jq '.triage.recommendations_by_track[].top_pick' - Top pick per track",
+				"jq '.triage.recommendations_by_label[].claim_command' - Claim commands per label",
 			},
 		}
 		encoder := json.NewEncoder(os.Stdout)

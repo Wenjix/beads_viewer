@@ -940,3 +940,212 @@ func findSubstring(s, substr string) bool {
 	}
 	return false
 }
+
+// ============================================================================
+// Tests for bv-87 Track/Label-aware Recommendation Grouping
+// ============================================================================
+
+func TestTriageGroupByTrack_Empty(t *testing.T) {
+	opts := TriageOptions{GroupByTrack: true}
+	triage := ComputeTriageWithOptions(nil, opts)
+
+	if triage.RecommendationsByTrack != nil && len(triage.RecommendationsByTrack) > 0 {
+		t.Errorf("expected empty track groups for nil issues, got %d", len(triage.RecommendationsByTrack))
+	}
+}
+
+func TestTriageGroupByTrack_SingleTrack(t *testing.T) {
+	// All issues in one connected component
+	issues := []model.Issue{
+		{ID: "a", Title: "A", Status: model.StatusOpen, Priority: 0, UpdatedAt: time.Now()},
+		{
+			ID:           "b",
+			Title:        "B",
+			Status:       model.StatusOpen,
+			Priority:     1,
+			UpdatedAt:    time.Now(),
+			Dependencies: []*model.Dependency{{DependsOnID: "a", Type: model.DepBlocks}},
+		},
+	}
+
+	opts := TriageOptions{GroupByTrack: true}
+	triage := ComputeTriageWithOptions(issues, opts)
+
+	if len(triage.RecommendationsByTrack) == 0 {
+		t.Fatal("expected at least one track group")
+	}
+
+	// All recommendations should be in one track (connected component)
+	totalRecs := 0
+	for _, g := range triage.RecommendationsByTrack {
+		totalRecs += len(g.Recommendations)
+		// Each non-empty track should have a top pick
+		if len(g.Recommendations) > 0 && g.TopPick == nil {
+			t.Errorf("track %s missing top pick", g.TrackID)
+		}
+	}
+
+	// At least one actionable issue should be in recommendations
+	if totalRecs == 0 {
+		t.Error("expected recommendations in track groups")
+	}
+}
+
+func TestTriageGroupByTrack_MultipleTracks(t *testing.T) {
+	// Two disconnected components
+	issues := []model.Issue{
+		{ID: "a1", Title: "A1", Status: model.StatusOpen, Priority: 0, UpdatedAt: time.Now()},
+		{
+			ID:           "a2",
+			Title:        "A2",
+			Status:       model.StatusOpen,
+			Priority:     1,
+			UpdatedAt:    time.Now(),
+			Dependencies: []*model.Dependency{{DependsOnID: "a1", Type: model.DepBlocks}},
+		},
+		{ID: "b1", Title: "B1", Status: model.StatusOpen, Priority: 0, UpdatedAt: time.Now()},
+		{
+			ID:           "b2",
+			Title:        "B2",
+			Status:       model.StatusOpen,
+			Priority:     1,
+			UpdatedAt:    time.Now(),
+			Dependencies: []*model.Dependency{{DependsOnID: "b1", Type: model.DepBlocks}},
+		},
+	}
+
+	opts := TriageOptions{GroupByTrack: true}
+	triage := ComputeTriageWithOptions(issues, opts)
+
+	// Should have at least 2 tracks (two disconnected components)
+	if len(triage.RecommendationsByTrack) < 2 {
+		t.Errorf("expected at least 2 track groups for disconnected issues, got %d", len(triage.RecommendationsByTrack))
+	}
+}
+
+func TestTriageGroupByLabel_Empty(t *testing.T) {
+	opts := TriageOptions{GroupByLabel: true}
+	triage := ComputeTriageWithOptions(nil, opts)
+
+	if triage.RecommendationsByLabel != nil && len(triage.RecommendationsByLabel) > 0 {
+		t.Errorf("expected empty label groups for nil issues, got %d", len(triage.RecommendationsByLabel))
+	}
+}
+
+func TestTriageGroupByLabel_SingleLabel(t *testing.T) {
+	issues := []model.Issue{
+		{ID: "a", Title: "A", Status: model.StatusOpen, Priority: 0, Labels: []string{"api"}, UpdatedAt: time.Now()},
+		{ID: "b", Title: "B", Status: model.StatusOpen, Priority: 1, Labels: []string{"api"}, UpdatedAt: time.Now()},
+	}
+
+	opts := TriageOptions{GroupByLabel: true}
+	triage := ComputeTriageWithOptions(issues, opts)
+
+	// Should have one label group for "api"
+	foundAPI := false
+	for _, g := range triage.RecommendationsByLabel {
+		if g.Label == "api" {
+			foundAPI = true
+			if len(g.Recommendations) != 2 {
+				t.Errorf("expected 2 recommendations for 'api' label, got %d", len(g.Recommendations))
+			}
+			if g.TopPick == nil {
+				t.Error("api label group missing top pick")
+			}
+		}
+	}
+	if !foundAPI {
+		t.Error("expected 'api' label group")
+	}
+}
+
+func TestTriageGroupByLabel_MultipleLabels(t *testing.T) {
+	// Note: The label grouping uses only the PRIMARY label (first label)
+	issues := []model.Issue{
+		{ID: "a", Title: "A", Status: model.StatusOpen, Priority: 0, Labels: []string{"api"}, UpdatedAt: time.Now()},
+		{ID: "b", Title: "B", Status: model.StatusOpen, Priority: 1, Labels: []string{"frontend"}, UpdatedAt: time.Now()},
+		{ID: "c", Title: "C", Status: model.StatusOpen, Priority: 2, Labels: []string{"database"}, UpdatedAt: time.Now()},
+	}
+
+	opts := TriageOptions{GroupByLabel: true}
+	triage := ComputeTriageWithOptions(issues, opts)
+
+	// Should have 3 label groups (api, frontend, database) - each uses primary label
+	labels := make(map[string]bool)
+	for _, g := range triage.RecommendationsByLabel {
+		labels[g.Label] = true
+	}
+
+	if !labels["api"] {
+		t.Error("expected 'api' label group")
+	}
+	if !labels["frontend"] {
+		t.Error("expected 'frontend' label group")
+	}
+	if !labels["database"] {
+		t.Error("expected 'database' label group")
+	}
+}
+
+func TestTriageGroupByLabel_UnlabeledIssues(t *testing.T) {
+	issues := []model.Issue{
+		{ID: "a", Title: "A", Status: model.StatusOpen, Priority: 0, Labels: []string{}, UpdatedAt: time.Now()},
+		{ID: "b", Title: "B", Status: model.StatusOpen, Priority: 1, Labels: []string{"api"}, UpdatedAt: time.Now()},
+	}
+
+	opts := TriageOptions{GroupByLabel: true}
+	triage := ComputeTriageWithOptions(issues, opts)
+
+	// Should have an "unlabeled" group
+	foundUnlabeled := false
+	for _, g := range triage.RecommendationsByLabel {
+		if g.Label == "unlabeled" {
+			foundUnlabeled = true
+			break
+		}
+	}
+	if !foundUnlabeled {
+		t.Error("expected 'unlabeled' group for issues without labels")
+	}
+}
+
+func TestTriageGroupByTrackAndLabel_Both(t *testing.T) {
+	issues := []model.Issue{
+		{ID: "a", Title: "A", Status: model.StatusOpen, Priority: 0, Labels: []string{"api"}, UpdatedAt: time.Now()},
+		{ID: "b", Title: "B", Status: model.StatusOpen, Priority: 1, Labels: []string{"frontend"}, UpdatedAt: time.Now()},
+	}
+
+	opts := TriageOptions{GroupByTrack: true, GroupByLabel: true}
+	triage := ComputeTriageWithOptions(issues, opts)
+
+	// Both should be populated
+	if len(triage.RecommendationsByTrack) == 0 {
+		t.Error("expected track groups when GroupByTrack is true")
+	}
+	if len(triage.RecommendationsByLabel) == 0 {
+		t.Error("expected label groups when GroupByLabel is true")
+	}
+}
+
+func TestTriageGroupByTrack_TopPickHasHighestScore(t *testing.T) {
+	issues := []model.Issue{
+		{ID: "low", Title: "Low priority", Status: model.StatusOpen, Priority: 4, UpdatedAt: time.Now()},
+		{ID: "high", Title: "High priority", Status: model.StatusOpen, Priority: 0, UpdatedAt: time.Now()},
+	}
+
+	opts := TriageOptions{GroupByTrack: true}
+	triage := ComputeTriageWithOptions(issues, opts)
+
+	for _, g := range triage.RecommendationsByTrack {
+		if g.TopPick == nil || len(g.Recommendations) == 0 {
+			continue
+		}
+		// Top pick should have the highest score in the group
+		for _, rec := range g.Recommendations {
+			if rec.Score > g.TopPick.Score {
+				t.Errorf("track %s: recommendation %s has higher score (%.4f) than top pick %s (%.4f)",
+					g.TrackID, rec.ID, rec.Score, g.TopPick.ID, g.TopPick.Score)
+			}
+		}
+	}
+}
