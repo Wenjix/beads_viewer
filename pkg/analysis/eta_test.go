@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -87,7 +88,7 @@ func TestEstimateETAForIssue_WithExplicitEstimate(t *testing.T) {
 	// Should mention explicit estimate in factors
 	hasExplicitFactor := false
 	for _, f := range eta.Factors {
-		if len(f) > 0 && f[:8] == "estimate" {
+		if strings.HasPrefix(f, "estimate:") {
 			hasExplicitFactor = true
 			break
 		}
@@ -176,13 +177,47 @@ func TestEstimateETAForIssue_VelocityFromClosures(t *testing.T) {
 	// Should have velocity factor from closure history
 	hasVelocityFactor := false
 	for _, f := range eta.Factors {
-		if len(f) >= 8 && f[:8] == "velocity" {
+		if strings.HasPrefix(f, "velocity:") {
 			hasVelocityFactor = true
 			break
 		}
 	}
 	if !hasVelocityFactor {
 		t.Error("Expected velocity factor from closure history")
+	}
+}
+
+func TestEstimateETAForIssue_DepthAffectsComplexity(t *testing.T) {
+	now := time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	issues := []model.Issue{
+		{
+			ID:          "depth-1",
+			Title:       "Depth issue",
+			Status:      model.StatusOpen,
+			IssueType:   model.TypeTask,
+			Description: "",
+		},
+	}
+
+	baseETA, err := EstimateETAForIssue(issues, nil, "depth-1", 1, now)
+	if err != nil {
+		t.Fatalf("EstimateETAForIssue failed: %v", err)
+	}
+
+	stats := &GraphStats{
+		criticalPathScore: map[string]float64{"depth-1": 10},
+	}
+	depthETA, err := EstimateETAForIssue(issues, stats, "depth-1", 1, now)
+	if err != nil {
+		t.Fatalf("EstimateETAForIssue failed: %v", err)
+	}
+
+	if depthETA.EstimatedMinutes <= baseETA.EstimatedMinutes {
+		t.Errorf("Expected depth to increase estimated minutes: base=%d, depth=%d", baseETA.EstimatedMinutes, depthETA.EstimatedMinutes)
+	}
+	if depthETA.EstimatedDays <= baseETA.EstimatedDays {
+		t.Errorf("Expected depth to increase estimated days: base=%f, depth=%f", baseETA.EstimatedDays, depthETA.EstimatedDays)
 	}
 }
 
@@ -248,4 +283,271 @@ func TestDurationDays(t *testing.T) {
 	}
 }
 
-// TestHasLabel is in label_health_test.go
+// TestHasLabel tests the hasLabel helper function
+func TestHasLabelETA(t *testing.T) {
+	if !hasLabel([]string{"a", "b", "c"}, "b") {
+		t.Error("hasLabel should find 'b' in slice")
+	}
+	if hasLabel([]string{"a", "b", "c"}, "d") {
+		t.Error("hasLabel should not find 'd' in slice")
+	}
+	if hasLabel([]string{}, "a") {
+		t.Error("hasLabel should return false for empty slice")
+	}
+	if hasLabel(nil, "a") {
+		t.Error("hasLabel should return false for nil slice")
+	}
+}
+
+func TestEstimateETAForIssue_AllIssueTypes(t *testing.T) {
+	now := time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	types := []struct {
+		issueType model.IssueType
+		name      string
+	}{
+		{model.TypeBug, "bug"},
+		{model.TypeTask, "task"},
+		{model.TypeChore, "chore"},
+		{model.TypeFeature, "feature"},
+		{model.TypeEpic, "epic"},
+	}
+
+	for _, tc := range types {
+		t.Run(tc.name, func(t *testing.T) {
+			issues := []model.Issue{
+				{
+					ID:        "test-1",
+					Title:     "Test " + tc.name,
+					Status:    model.StatusOpen,
+					IssueType: tc.issueType,
+				},
+			}
+			eta, err := EstimateETAForIssue(issues, nil, "test-1", 1, now)
+			if err != nil {
+				t.Fatalf("EstimateETAForIssue failed for %s: %v", tc.name, err)
+			}
+			if eta.EstimatedMinutes <= 0 {
+				t.Errorf("Expected positive minutes for %s, got %d", tc.name, eta.EstimatedMinutes)
+			}
+		})
+	}
+}
+
+func TestEstimateETAForIssue_ZeroAgents(t *testing.T) {
+	now := time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	issues := []model.Issue{
+		{
+			ID:        "test-1",
+			Title:     "Test issue",
+			Status:    model.StatusOpen,
+			IssueType: model.TypeTask,
+		},
+	}
+
+	// Zero agents should normalize to 1
+	eta, err := EstimateETAForIssue(issues, nil, "test-1", 0, now)
+	if err != nil {
+		t.Fatalf("EstimateETAForIssue failed: %v", err)
+	}
+	if eta.Agents != 1 {
+		t.Errorf("Expected agents to be normalized to 1, got %d", eta.Agents)
+	}
+}
+
+func TestEstimateETAForIssue_DescriptionLengthImpact(t *testing.T) {
+	now := time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	shortDesc := "Short description"
+	longDesc := strings.Repeat("This is a very long description. ", 100) // ~3000 chars
+
+	shortIssue := model.Issue{
+		ID:          "short-1",
+		Title:       "Short desc issue",
+		Status:      model.StatusOpen,
+		IssueType:   model.TypeTask,
+		Description: shortDesc,
+	}
+
+	longIssue := model.Issue{
+		ID:          "long-1",
+		Title:       "Long desc issue",
+		Status:      model.StatusOpen,
+		IssueType:   model.TypeTask,
+		Description: longDesc,
+	}
+
+	shortETA, _ := EstimateETAForIssue([]model.Issue{shortIssue}, nil, "short-1", 1, now)
+	longETA, _ := EstimateETAForIssue([]model.Issue{longIssue}, nil, "long-1", 1, now)
+
+	// Longer description should increase complexity
+	if longETA.EstimatedMinutes <= shortETA.EstimatedMinutes {
+		t.Errorf("Long description should increase estimate: short=%d, long=%d",
+			shortETA.EstimatedMinutes, longETA.EstimatedMinutes)
+	}
+}
+
+func TestEstimateETAForIssue_NoLabelsConfidencePenalty(t *testing.T) {
+	now := time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	withLabels := model.Issue{
+		ID:        "with-labels",
+		Title:     "Issue with labels",
+		Status:    model.StatusOpen,
+		IssueType: model.TypeTask,
+		Labels:    []string{"backend", "api"},
+	}
+
+	noLabels := model.Issue{
+		ID:        "no-labels",
+		Title:     "Issue without labels",
+		Status:    model.StatusOpen,
+		IssueType: model.TypeTask,
+		Labels:    []string{},
+	}
+
+	withLabelsETA, _ := EstimateETAForIssue([]model.Issue{withLabels}, nil, "with-labels", 1, now)
+	noLabelsETA, _ := EstimateETAForIssue([]model.Issue{noLabels}, nil, "no-labels", 1, now)
+
+	// No labels should have lower confidence (penalty applied)
+	if noLabelsETA.Confidence >= withLabelsETA.Confidence {
+		t.Errorf("No labels should have lower confidence: with=%f, without=%f",
+			withLabelsETA.Confidence, noLabelsETA.Confidence)
+	}
+}
+
+func TestVelocityMinutesPerDayForLabel_EdgeCases(t *testing.T) {
+	now := time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC)
+	since := now.Add(-30 * 24 * time.Hour)
+
+	// No closed issues
+	openOnly := []model.Issue{
+		{ID: "1", Status: model.StatusOpen},
+	}
+	v, n := velocityMinutesPerDayForLabel(openOnly, "", since, 60)
+	if v != 0 || n != 0 {
+		t.Errorf("No closed issues should return 0 velocity: v=%f, n=%d", v, n)
+	}
+
+	// Closed issues before window
+	oldClosed := now.Add(-60 * 24 * time.Hour) // 60 days ago
+	oldClosures := []model.Issue{
+		{ID: "1", Status: model.StatusClosed, ClosedAt: &oldClosed},
+	}
+	v, n = velocityMinutesPerDayForLabel(oldClosures, "", since, 60)
+	if v != 0 || n != 0 {
+		t.Errorf("Old closures should return 0 velocity: v=%f, n=%d", v, n)
+	}
+
+	// Closed issues within window
+	recentClosed := now.Add(-7 * 24 * time.Hour) // 7 days ago
+	est120 := 120
+	recentClosures := []model.Issue{
+		{ID: "1", Status: model.StatusClosed, ClosedAt: &recentClosed, EstimatedMinutes: &est120, Labels: []string{"api"}},
+	}
+	v, n = velocityMinutesPerDayForLabel(recentClosures, "api", since, 60)
+	if n != 1 {
+		t.Errorf("Expected 1 sample, got %d", n)
+	}
+	if v <= 0 {
+		t.Errorf("Expected positive velocity, got %f", v)
+	}
+}
+
+func TestEstimateETAConfidence_AllCases(t *testing.T) {
+	est120 := 120
+
+	tests := []struct {
+		name            string
+		issue           model.Issue
+		velocitySamples int
+		minExpected     float64
+		maxExpected     float64
+	}{
+		{
+			name:            "no estimate, no samples, no labels",
+			issue:           model.Issue{Labels: nil},
+			velocitySamples: 0,
+			minExpected:     0.10, // 0.25 - 0.05 - 0.05 = 0.15, clamped to 0.10
+			maxExpected:     0.20,
+		},
+		{
+			name:            "with estimate, no samples, with labels",
+			issue:           model.Issue{EstimatedMinutes: &est120, Labels: []string{"api"}},
+			velocitySamples: 0,
+			minExpected:     0.40, // 0.25 + 0.25 - 0.05 = 0.45
+			maxExpected:     0.50,
+		},
+		{
+			name:            "with estimate, few samples (1-4), with labels",
+			issue:           model.Issue{EstimatedMinutes: &est120, Labels: []string{"api"}},
+			velocitySamples: 3,
+			minExpected:     0.55, // 0.25 + 0.25 + 0.10 = 0.60
+			maxExpected:     0.65,
+		},
+		{
+			name:            "with estimate, medium samples (5-14), with labels",
+			issue:           model.Issue{EstimatedMinutes: &est120, Labels: []string{"api"}},
+			velocitySamples: 10,
+			minExpected:     0.65, // 0.25 + 0.25 + 0.20 = 0.70
+			maxExpected:     0.75,
+		},
+		{
+			name:            "with estimate, many samples (15+), with labels",
+			issue:           model.Issue{EstimatedMinutes: &est120, Labels: []string{"api"}},
+			velocitySamples: 20,
+			minExpected:     0.75, // 0.25 + 0.25 + 0.30 = 0.80
+			maxExpected:     0.85,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := estimateETAConfidence(tc.issue, tc.velocitySamples)
+			if conf < tc.minExpected || conf > tc.maxExpected {
+				t.Errorf("Expected confidence in [%f, %f], got %f", tc.minExpected, tc.maxExpected, conf)
+			}
+		})
+	}
+}
+
+func TestEstimateETAForIssue_GlobalVelocityFallback(t *testing.T) {
+	now := time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC)
+	closedAt := now.Add(-7 * 24 * time.Hour)
+
+	// Issue with labels that have no velocity data, but global velocity exists
+	issues := []model.Issue{
+		{
+			ID:        "target",
+			Title:     "Target issue",
+			Status:    model.StatusOpen,
+			IssueType: model.TypeTask,
+			Labels:    []string{"rare-label"}, // No closures for this label
+		},
+		{
+			ID:       "closed-global",
+			Title:    "Closed issue",
+			Status:   model.StatusClosed,
+			ClosedAt: &closedAt,
+			Labels:   []string{"other-label"},
+		},
+	}
+
+	eta, err := EstimateETAForIssue(issues, nil, "target", 1, now)
+	if err != nil {
+		t.Fatalf("EstimateETAForIssue failed: %v", err)
+	}
+
+	// Should fallback to global velocity
+	hasGlobalVelocity := false
+	for _, f := range eta.Factors {
+		if strings.Contains(f, "global") {
+			hasGlobalVelocity = true
+			break
+		}
+	}
+	if !hasGlobalVelocity {
+		t.Error("Expected global velocity fallback in factors")
+	}
+}
