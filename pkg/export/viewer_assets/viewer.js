@@ -819,6 +819,136 @@ function getIssueDependencies(id) {
 }
 
 // ============================================================================
+// URL State Sync - Shareable filtered views
+// ============================================================================
+
+/**
+ * Serialize filters to URL search params
+ */
+function filtersToURL(filters, sort, searchQuery) {
+  const params = new URLSearchParams();
+
+  if (filters.status?.length) {
+    const statuses = Array.isArray(filters.status) ? filters.status : [filters.status];
+    if (statuses.length > 0 && statuses[0]) {
+      params.set('status', statuses.join(','));
+    }
+  }
+
+  if (filters.type?.length) {
+    const types = Array.isArray(filters.type) ? filters.type : [filters.type];
+    if (types.length > 0 && types[0]) {
+      params.set('type', types.join(','));
+    }
+  }
+
+  if (filters.priority?.length) {
+    const priorities = Array.isArray(filters.priority) ? filters.priority : [filters.priority];
+    const validPriorities = priorities.filter(p => p !== '' && p !== null && p !== undefined);
+    if (validPriorities.length > 0) {
+      params.set('priority', validPriorities.join(','));
+    }
+  }
+
+  if (filters.labels?.length) {
+    params.set('labels', filters.labels.join(','));
+  }
+
+  if (filters.assignee) {
+    params.set('assignee', filters.assignee);
+  }
+
+  if (filters.hasBlockers === true || filters.hasBlockers === 'true') {
+    params.set('blocked', 'true');
+  } else if (filters.hasBlockers === false || filters.hasBlockers === 'false') {
+    params.set('blocked', 'false');
+  }
+
+  if (filters.isBlocking === true || filters.isBlocking === 'true') {
+    params.set('blocking', 'true');
+  }
+
+  if (searchQuery) {
+    params.set('q', searchQuery);
+  }
+
+  if (sort && sort !== 'priority') {
+    params.set('sort', sort);
+  }
+
+  return params.toString();
+}
+
+/**
+ * Parse URL search params to filters
+ */
+function filtersFromURL() {
+  const hash = window.location.hash;
+  const queryIndex = hash.indexOf('?');
+  if (queryIndex === -1) return { filters: {}, sort: 'priority', searchQuery: '' };
+
+  const params = new URLSearchParams(hash.slice(queryIndex + 1));
+
+  const filters = {};
+
+  const statusParam = params.get('status');
+  if (statusParam) {
+    filters.status = statusParam.split(',').filter(Boolean);
+  }
+
+  const typeParam = params.get('type');
+  if (typeParam) {
+    filters.type = typeParam.split(',').filter(Boolean);
+  }
+
+  const priorityParam = params.get('priority');
+  if (priorityParam) {
+    filters.priority = priorityParam.split(',').map(Number).filter(n => !isNaN(n));
+  }
+
+  const labelsParam = params.get('labels');
+  if (labelsParam) {
+    filters.labels = labelsParam.split(',').filter(Boolean);
+  }
+
+  const assigneeParam = params.get('assignee');
+  if (assigneeParam) {
+    filters.assignee = assigneeParam;
+  }
+
+  const blockedParam = params.get('blocked');
+  if (blockedParam === 'true') {
+    filters.hasBlockers = true;
+  } else if (blockedParam === 'false') {
+    filters.hasBlockers = false;
+  }
+
+  const blockingParam = params.get('blocking');
+  if (blockingParam === 'true') {
+    filters.isBlocking = true;
+  }
+
+  return {
+    filters,
+    sort: params.get('sort') || 'priority',
+    searchQuery: params.get('q') || '',
+  };
+}
+
+/**
+ * Update URL with current filter state (without page reload)
+ */
+function syncFiltersToURL(view, filters, sort, searchQuery) {
+  const paramString = filtersToURL(filters, sort, searchQuery);
+  const baseHash = `#/${view}`;
+  const newHash = paramString ? `${baseHash}?${paramString}` : baseHash;
+
+  if (window.location.hash !== newHash) {
+    history.replaceState(null, '', newHash);
+  }
+}
+
+// ============================================================================
 // Alpine.js Application
 // ============================================================================
 
@@ -877,11 +1007,24 @@ function beadsApp() {
     page: 1,
     pageSize: 20,
 
-    // Filters
+    // Filter options (populated from database)
+    filterOptions: {
+      statuses: [],
+      types: [],
+      priorities: [],
+      assignees: [],
+      labels: [],
+    },
+
+    // Filters (supports multi-select arrays)
     filters: {
-      status: '',
-      type: '',
-      priority: '',
+      status: [],      // Array for multi-select
+      type: [],        // Array for multi-select
+      priority: [],    // Array for multi-select
+      labels: [],      // Array for multi-select
+      assignee: '',    // Single select
+      hasBlockers: null, // true/false/null
+      isBlocking: null,  // true/false/null
     },
     sort: 'priority',
     searchQuery: '',
@@ -939,6 +1082,18 @@ function beadsApp() {
         this.distributionByType = getDistributionByType();
         this.distributionByPriority = getDistributionByPriority();
 
+        // Load filter options for dropdowns
+        this.filterOptions = getFilterOptions();
+
+        // Restore filters from URL if present
+        const urlState = filtersFromURL();
+        if (Object.keys(urlState.filters).length > 0) {
+          this.filters = { ...this.filters, ...urlState.filters };
+          this.sort = urlState.sort;
+          this.searchQuery = urlState.searchQuery;
+          this.view = 'issues'; // Switch to issues view if filters in URL
+        }
+
         // Load issues for list view
         this.loadIssues();
 
@@ -949,11 +1104,38 @@ function beadsApp() {
           this.topKSet = getTopKSet(5);
         }
 
+        // Listen for hash changes (browser back/forward)
+        window.addEventListener('hashchange', () => this.handleHashChange());
+
         this.loading = false;
       } catch (err) {
         console.error('Init failed:', err);
         this.error = err.message || 'Failed to load database';
         this.loading = false;
+      }
+    },
+
+    /**
+     * Handle hash change (browser back/forward navigation)
+     */
+    handleHashChange() {
+      const urlState = filtersFromURL();
+      const hash = window.location.hash;
+
+      // Determine view from hash
+      if (hash.startsWith('#/issues')) {
+        this.view = 'issues';
+        this.filters = { ...this.filters, ...urlState.filters };
+        this.sort = urlState.sort;
+        this.searchQuery = urlState.searchQuery;
+        this.page = 1;
+        this.loadIssues();
+      } else if (hash.startsWith('#/insights')) {
+        this.view = 'insights';
+      } else if (hash.startsWith('#/graph')) {
+        this.view = 'graph';
+      } else {
+        this.view = 'dashboard';
       }
     },
 
@@ -969,6 +1151,76 @@ function beadsApp() {
 
       this.issues = queryIssues(filters, this.sort, this.pageSize, offset);
       this.totalIssues = countIssues(filters);
+
+      // Sync URL state (only on issues view)
+      if (this.view === 'issues') {
+        syncFiltersToURL('issues', this.filters, this.sort, this.searchQuery);
+      }
+    },
+
+    /**
+     * Apply filter and reload (resets to page 1)
+     */
+    applyFilter() {
+      this.page = 1;
+      this.loadIssues();
+    },
+
+    /**
+     * Clear all filters
+     */
+    clearFilters() {
+      this.filters = {
+        status: [],
+        type: [],
+        priority: [],
+        labels: [],
+        assignee: '',
+        hasBlockers: null,
+        isBlocking: null,
+      };
+      this.searchQuery = '';
+      this.sort = 'priority';
+      this.page = 1;
+      this.loadIssues();
+    },
+
+    /**
+     * Check if any filters are active
+     */
+    get hasActiveFilters() {
+      return this.filters.status?.length > 0 ||
+             this.filters.type?.length > 0 ||
+             this.filters.priority?.length > 0 ||
+             this.filters.labels?.length > 0 ||
+             this.filters.assignee ||
+             this.filters.hasBlockers !== null ||
+             this.filters.isBlocking !== null ||
+             this.searchQuery;
+    },
+
+    /**
+     * Toggle a value in a multi-select filter array
+     */
+    toggleFilter(filterName, value) {
+      if (!Array.isArray(this.filters[filterName])) {
+        this.filters[filterName] = [];
+      }
+      const index = this.filters[filterName].indexOf(value);
+      if (index === -1) {
+        this.filters[filterName].push(value);
+      } else {
+        this.filters[filterName].splice(index, 1);
+      }
+      this.applyFilter();
+    },
+
+    /**
+     * Check if a value is selected in a multi-select filter
+     */
+    isFilterSelected(filterName, value) {
+      if (!Array.isArray(this.filters[filterName])) return false;
+      return this.filters[filterName].includes(value);
     },
 
     /**
@@ -1083,10 +1335,19 @@ window.beadsViewer = {
   loadDatabase,
   execQuery,
   queryIssues,
+  countIssues,
   getIssue,
   getIssueDependencies,
   getStats,
   getMeta,
+  getFilterOptions,
+  getUniqueLabels,
+  searchIssues,
+
+  // URL State
+  filtersToURL,
+  filtersFromURL,
+  syncFiltersToURL,
 
   // Graph Engine
   GRAPH_STATE,
