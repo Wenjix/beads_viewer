@@ -1745,3 +1745,279 @@ func TestAttentionScoresSingleLabel(t *testing.T) {
 		t.Errorf("Expected rank 1, got %d", result.Labels[0].Rank)
 	}
 }
+
+// ============================================================================
+// Historical Velocity Tests (bv-123)
+// ============================================================================
+
+func TestComputeHistoricalVelocity_BasicCounting(t *testing.T) {
+	// Use a Monday as 'now' for clearer week alignment
+	now := time.Date(2025, 12, 15, 12, 0, 0, 0, time.UTC) // Monday Dec 15, 2025
+
+	// Create issues closed in different weeks (relative to Monday start)
+	// Week 0 = Dec 15-21 (current week)
+	// Week 1 = Dec 8-14
+	// Week 2 = Dec 1-7
+	// Week 3 = Nov 24-30
+	week0Close := time.Date(2025, 12, 16, 10, 0, 0, 0, time.UTC) // Tuesday Dec 16 (week 0)
+	week1Close := time.Date(2025, 12, 10, 10, 0, 0, 0, time.UTC) // Wednesday Dec 10 (week 1)
+	week2Close := time.Date(2025, 12, 3, 10, 0, 0, 0, time.UTC)  // Wednesday Dec 3 (week 2)
+	week3Close := time.Date(2025, 11, 26, 10, 0, 0, 0, time.UTC) // Wednesday Nov 26 (week 3)
+
+	issues := []model.Issue{
+		{ID: "bv-1", Labels: []string{"api"}, Status: model.StatusClosed, ClosedAt: &week0Close},
+		{ID: "bv-2", Labels: []string{"api"}, Status: model.StatusClosed, ClosedAt: &week0Close},
+		{ID: "bv-3", Labels: []string{"api"}, Status: model.StatusClosed, ClosedAt: &week1Close},
+		{ID: "bv-4", Labels: []string{"api"}, Status: model.StatusClosed, ClosedAt: &week2Close},
+		{ID: "bv-5", Labels: []string{"api"}, Status: model.StatusClosed, ClosedAt: &week2Close},
+		{ID: "bv-6", Labels: []string{"api"}, Status: model.StatusClosed, ClosedAt: &week2Close},
+		{ID: "bv-7", Labels: []string{"api"}, Status: model.StatusClosed, ClosedAt: &week3Close},
+		{ID: "bv-8", Labels: []string{"ui"}, Status: model.StatusClosed, ClosedAt: &week0Close}, // Different label
+	}
+
+	result := ComputeHistoricalVelocity(issues, "api", 4, now)
+
+	if result.Label != "api" {
+		t.Errorf("Expected label 'api', got '%s'", result.Label)
+	}
+	if result.WeeksAnalyzed != 4 {
+		t.Errorf("Expected 4 weeks analyzed, got %d", result.WeeksAnalyzed)
+	}
+
+	// Week 0 (current week): 2 closed
+	if result.WeeklyVelocity[0].Closed != 2 {
+		t.Errorf("Week 0: expected 2 closed, got %d", result.WeeklyVelocity[0].Closed)
+	}
+	// Week 1 (last week): 1 closed
+	if result.WeeklyVelocity[1].Closed != 1 {
+		t.Errorf("Week 1: expected 1 closed, got %d", result.WeeklyVelocity[1].Closed)
+	}
+	// Week 2: 3 closed
+	if result.WeeklyVelocity[2].Closed != 3 {
+		t.Errorf("Week 2: expected 3 closed, got %d", result.WeeklyVelocity[2].Closed)
+	}
+	// Week 3: 1 closed
+	if result.WeeklyVelocity[3].Closed != 1 {
+		t.Errorf("Week 3: expected 1 closed, got %d", result.WeeklyVelocity[3].Closed)
+	}
+}
+
+func TestComputeHistoricalVelocity_PeakAndTrough(t *testing.T) {
+	// Use a Monday for clearer week alignment
+	now := time.Date(2025, 12, 15, 12, 0, 0, 0, time.UTC) // Monday Dec 15
+
+	// Create varying velocity with specific dates in each week
+	week0Close := time.Date(2025, 12, 16, 10, 0, 0, 0, time.UTC) // Week 0: Dec 15-21
+	week1Close := time.Date(2025, 12, 10, 10, 0, 0, 0, time.UTC) // Week 1: Dec 8-14
+	week2Close := time.Date(2025, 12, 3, 10, 0, 0, 0, time.UTC)  // Week 2: Dec 1-7
+	week3Close := time.Date(2025, 11, 26, 10, 0, 0, 0, time.UTC) // Week 3: Nov 24-30
+
+	issues := []model.Issue{
+		// Week 0: 2 issues
+		{ID: "w0-1", Labels: []string{"test"}, Status: model.StatusClosed, ClosedAt: &week0Close},
+		{ID: "w0-2", Labels: []string{"test"}, Status: model.StatusClosed, ClosedAt: &week0Close},
+		// Week 1: 5 issues (peak)
+		{ID: "w1-1", Labels: []string{"test"}, Status: model.StatusClosed, ClosedAt: &week1Close},
+		{ID: "w1-2", Labels: []string{"test"}, Status: model.StatusClosed, ClosedAt: &week1Close},
+		{ID: "w1-3", Labels: []string{"test"}, Status: model.StatusClosed, ClosedAt: &week1Close},
+		{ID: "w1-4", Labels: []string{"test"}, Status: model.StatusClosed, ClosedAt: &week1Close},
+		{ID: "w1-5", Labels: []string{"test"}, Status: model.StatusClosed, ClosedAt: &week1Close},
+		// Week 2: 1 issue (trough)
+		{ID: "w2-1", Labels: []string{"test"}, Status: model.StatusClosed, ClosedAt: &week2Close},
+		// Week 3: 3 issues
+		{ID: "w3-1", Labels: []string{"test"}, Status: model.StatusClosed, ClosedAt: &week3Close},
+		{ID: "w3-2", Labels: []string{"test"}, Status: model.StatusClosed, ClosedAt: &week3Close},
+		{ID: "w3-3", Labels: []string{"test"}, Status: model.StatusClosed, ClosedAt: &week3Close},
+	}
+
+	result := ComputeHistoricalVelocity(issues, "test", 4, now)
+
+	// Peak should be week 1 with 5
+	if result.PeakWeek != 1 {
+		t.Errorf("Expected peak week 1, got %d", result.PeakWeek)
+	}
+	if result.PeakVelocity != 5 {
+		t.Errorf("Expected peak velocity 5, got %d", result.PeakVelocity)
+	}
+
+	// Trough should be week 2 with 1
+	if result.TroughWeek != 2 {
+		t.Errorf("Expected trough week 2, got %d", result.TroughWeek)
+	}
+	if result.TroughVelocity != 1 {
+		t.Errorf("Expected trough velocity 1, got %d", result.TroughVelocity)
+	}
+}
+
+func TestComputeHistoricalVelocity_MovingAverages(t *testing.T) {
+	// Use a Monday for clearer week alignment
+	now := time.Date(2025, 12, 15, 12, 0, 0, 0, time.UTC) // Monday Dec 15
+
+	// Create 8 weeks of data: each week has weeksAgo+1 closures
+	// Week 0: 1, Week 1: 2, Week 2: 3, ... Week 7: 8
+	var issues []model.Issue
+	for w := 0; w < 8; w++ {
+		// Place closures in the middle of each week (Wednesday)
+		weekClose := now.AddDate(0, 0, -7*w+2) // Wednesday of that week
+		for i := 0; i <= w; i++ {
+			issues = append(issues, model.Issue{
+				ID:       fmt.Sprintf("w%d-%d", w, i),
+				Labels:   []string{"avg"},
+				Status:   model.StatusClosed,
+				ClosedAt: &weekClose,
+			})
+		}
+	}
+
+	result := ComputeHistoricalVelocity(issues, "avg", 8, now)
+
+	// 4-week moving avg: (1+2+3+4)/4 = 2.5
+	expected4 := 2.5
+	if result.MovingAvg4Week != expected4 {
+		t.Errorf("Expected 4-week moving avg %.2f, got %.2f", expected4, result.MovingAvg4Week)
+	}
+
+	// 8-week moving avg: (1+2+3+4+5+6+7+8)/8 = 4.5
+	expected8 := 4.5
+	if result.MovingAvg8Week != expected8 {
+		t.Errorf("Expected 8-week moving avg %.2f, got %.2f", expected8, result.MovingAvg8Week)
+	}
+}
+
+func TestComputeHistoricalVelocity_EmptyLabel(t *testing.T) {
+	now := time.Date(2025, 12, 16, 12, 0, 0, 0, time.UTC)
+
+	issues := []model.Issue{
+		{ID: "bv-1", Labels: []string{"other"}, Status: model.StatusOpen},
+	}
+
+	result := ComputeHistoricalVelocity(issues, "nonexistent", 4, now)
+
+	if result.Label != "nonexistent" {
+		t.Errorf("Expected label 'nonexistent', got '%s'", result.Label)
+	}
+	if result.PeakVelocity != 0 {
+		t.Errorf("Expected 0 peak velocity for nonexistent label, got %d", result.PeakVelocity)
+	}
+	// All weeks should have 0 closed
+	for i, snap := range result.WeeklyVelocity {
+		if snap.Closed != 0 {
+			t.Errorf("Week %d: expected 0 closed, got %d", i, snap.Closed)
+		}
+	}
+}
+
+func TestHistoricalVelocity_GetVelocityTrend(t *testing.T) {
+	tests := []struct {
+		name         string
+		weeklyData   []int // From most recent to oldest
+		expectedTrend string
+	}{
+		{
+			name:         "accelerating",
+			weeklyData:   []int{5, 4, 4, 3, 2, 2, 1, 1},
+			expectedTrend: "accelerating",
+		},
+		{
+			name:         "decelerating",
+			weeklyData:   []int{1, 1, 2, 2, 4, 4, 5, 5},
+			expectedTrend: "decelerating",
+		},
+		{
+			name:         "stable",
+			weeklyData:   []int{3, 3, 3, 3, 3, 3, 3, 3},
+			expectedTrend: "stable",
+		},
+		{
+			name:         "insufficient_data",
+			weeklyData:   []int{3, 3},
+			expectedTrend: "insufficient_data",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hv := HistoricalVelocity{
+				WeeksAnalyzed:  len(tt.weeklyData),
+				WeeklyVelocity: make([]WeeklySnapshot, len(tt.weeklyData)),
+			}
+			for i, v := range tt.weeklyData {
+				hv.WeeklyVelocity[i] = WeeklySnapshot{Closed: v, WeeksAgo: i}
+			}
+			// Calculate variance for erratic detection
+			if len(tt.weeklyData) > 0 {
+				var sum float64
+				for _, snap := range hv.WeeklyVelocity {
+					sum += float64(snap.Closed)
+				}
+				mean := sum / float64(len(tt.weeklyData))
+				var variance float64
+				for _, snap := range hv.WeeklyVelocity {
+					diff := float64(snap.Closed) - mean
+					variance += diff * diff
+				}
+				hv.Variance = variance / float64(len(tt.weeklyData))
+			}
+
+			trend := hv.GetVelocityTrend()
+			if trend != tt.expectedTrend {
+				t.Errorf("GetVelocityTrend() = %s, want %s", trend, tt.expectedTrend)
+			}
+		})
+	}
+}
+
+func TestHistoricalVelocity_GetWeeklyAverage(t *testing.T) {
+	hv := HistoricalVelocity{
+		WeeksAnalyzed: 4,
+		WeeklyVelocity: []WeeklySnapshot{
+			{Closed: 2},
+			{Closed: 4},
+			{Closed: 6},
+			{Closed: 8},
+		},
+	}
+
+	avg := hv.GetWeeklyAverage()
+	expected := 5.0 // (2+4+6+8)/4
+	if avg != expected {
+		t.Errorf("GetWeeklyAverage() = %.2f, want %.2f", avg, expected)
+	}
+}
+
+func TestComputeAllHistoricalVelocity(t *testing.T) {
+	// Use a Monday for clearer week alignment
+	now := time.Date(2025, 12, 15, 12, 0, 0, 0, time.UTC)
+	// Close issues on Tuesday of current week (week 0)
+	week0Close := time.Date(2025, 12, 16, 10, 0, 0, 0, time.UTC)
+
+	issues := []model.Issue{
+		{ID: "bv-1", Labels: []string{"api"}, Status: model.StatusClosed, ClosedAt: &week0Close},
+		{ID: "bv-2", Labels: []string{"ui"}, Status: model.StatusClosed, ClosedAt: &week0Close},
+		{ID: "bv-3", Labels: []string{"api", "ui"}, Status: model.StatusClosed, ClosedAt: &week0Close},
+	}
+
+	result := ComputeAllHistoricalVelocity(issues, 4, now)
+
+	if len(result) != 2 {
+		t.Errorf("Expected 2 labels, got %d", len(result))
+	}
+
+	apiVel, ok := result["api"]
+	if !ok {
+		t.Fatal("Expected 'api' label in results")
+	}
+	// api should have 2 issues (bv-1 and bv-3)
+	if apiVel.WeeklyVelocity[0].Closed != 2 {
+		t.Errorf("api week 0: expected 2 closed, got %d", apiVel.WeeklyVelocity[0].Closed)
+	}
+
+	uiVel, ok := result["ui"]
+	if !ok {
+		t.Fatal("Expected 'ui' label in results")
+	}
+	// ui should have 2 issues (bv-2 and bv-3)
+	if uiVel.WeeklyVelocity[0].Closed != 2 {
+		t.Errorf("ui week 0: expected 2 closed, got %d", uiVel.WeeklyVelocity[0].Closed)
+	}
+}

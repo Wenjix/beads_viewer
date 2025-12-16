@@ -41,6 +41,31 @@ type VelocityMetrics struct {
 	VelocityScore    int     `json:"velocity_score"`      // Normalized 0-100 score
 }
 
+// HistoricalVelocity captures velocity data across multiple time periods (bv-123)
+type HistoricalVelocity struct {
+	Label            string           `json:"label"`                       // Label this data is for
+	WeeklyVelocity   []WeeklySnapshot `json:"weekly_velocity"`             // Per-week closure counts
+	WeeksAnalyzed    int              `json:"weeks_analyzed"`              // Number of weeks with data
+	MovingAvg4Week   float64          `json:"moving_avg_4_week"`           // 4-week moving average
+	MovingAvg8Week   float64          `json:"moving_avg_8_week,omitempty"` // 8-week moving average (if data available)
+	PeakWeek         int              `json:"peak_week"`                   // Index of highest velocity week
+	PeakVelocity     int              `json:"peak_velocity"`               // Highest weekly closure count
+	TroughWeek       int              `json:"trough_week"`                 // Index of lowest velocity week (with >0)
+	TroughVelocity   int              `json:"trough_velocity"`             // Lowest weekly closure count (with >0)
+	Variance         float64          `json:"variance"`                    // Statistical variance in velocity
+	ConsistencyScore int              `json:"consistency_score"`           // 0-100, higher = more consistent output
+}
+
+// WeeklySnapshot captures closure data for a single week
+type WeeklySnapshot struct {
+	WeekStart  time.Time `json:"week_start"`  // Start of the week (Monday)
+	WeekEnd    time.Time `json:"week_end"`    // End of the week (Sunday)
+	Closed     int       `json:"closed"`      // Issues closed this week
+	WeeksAgo   int       `json:"weeks_ago"`   // 0 = current week, 1 = last week, etc.
+	IssueIDs   []string  `json:"issue_ids,omitempty"`
+	Cumulative int       `json:"cumulative"`  // Running total up to this week
+}
+
 // FreshnessMetrics tracks how recently issues in a label have been updated
 type FreshnessMetrics struct {
 	MostRecentUpdate   time.Time `json:"most_recent_update"`    // When was any issue last updated
@@ -1555,5 +1580,219 @@ func (r *LabelAttentionResult) GetLabelAttention(label string) *LabelAttentionSc
 		}
 	}
 	return nil
+}
+
+// ============================================================================
+// Historical Velocity Computation (bv-123)
+// ============================================================================
+
+// ComputeHistoricalVelocity calculates velocity per week for past N weeks.
+// This enables trend analysis, anomaly detection, and forecasting.
+// Uses ClosedAt timestamps from issues to bucket closures into weeks.
+func ComputeHistoricalVelocity(issues []model.Issue, label string, numWeeks int, now time.Time) HistoricalVelocity {
+	const day = 24 * time.Hour
+
+	result := HistoricalVelocity{
+		Label:          label,
+		WeeklyVelocity: make([]WeeklySnapshot, numWeeks),
+		WeeksAnalyzed:  numWeeks,
+	}
+
+	// Filter to labeled issues
+	var labeled []model.Issue
+	for _, iss := range issues {
+		for _, l := range iss.Labels {
+			if l == label {
+				labeled = append(labeled, iss)
+				break
+			}
+		}
+	}
+
+	// Calculate week boundaries (weeks start on Monday)
+	// weekStart aligns to the Monday of the current week
+	weekday := int(now.Weekday())
+	if weekday == 0 {
+		weekday = 7 // Sunday = 7
+	}
+	// Go back to Monday of current week
+	currentWeekStart := now.AddDate(0, 0, -(weekday - 1)).Truncate(24 * time.Hour)
+
+	// Build week buckets
+	for i := 0; i < numWeeks; i++ {
+		weekStart := currentWeekStart.AddDate(0, 0, -7*i)
+		weekEnd := weekStart.AddDate(0, 0, 7)
+		result.WeeklyVelocity[i] = WeeklySnapshot{
+			WeekStart: weekStart,
+			WeekEnd:   weekEnd,
+			WeeksAgo:  i,
+		}
+	}
+
+	// Bucket closed issues by week
+	cumulative := 0
+	for _, iss := range labeled {
+		if iss.ClosedAt == nil {
+			continue
+		}
+		closedAt := *iss.ClosedAt
+
+		// Find the appropriate week bucket
+		for i := range result.WeeklyVelocity {
+			snap := &result.WeeklyVelocity[i]
+			if !closedAt.Before(snap.WeekStart) && closedAt.Before(snap.WeekEnd) {
+				snap.Closed++
+				snap.IssueIDs = append(snap.IssueIDs, iss.ID)
+				break
+			}
+		}
+	}
+
+	// Calculate cumulative totals (from oldest to newest)
+	for i := numWeeks - 1; i >= 0; i-- {
+		cumulative += result.WeeklyVelocity[i].Closed
+		result.WeeklyVelocity[i].Cumulative = cumulative
+	}
+
+	// Find peak and trough weeks
+	peakVel := 0
+	troughVel := int(^uint(0) >> 1) // Max int
+	peakIdx := 0
+	troughIdx := 0
+	hasNonZero := false
+
+	for i, snap := range result.WeeklyVelocity {
+		if snap.Closed > peakVel {
+			peakVel = snap.Closed
+			peakIdx = i
+		}
+		if snap.Closed > 0 && snap.Closed < troughVel {
+			troughVel = snap.Closed
+			troughIdx = i
+			hasNonZero = true
+		}
+	}
+
+	result.PeakWeek = peakIdx
+	result.PeakVelocity = peakVel
+	if hasNonZero {
+		result.TroughWeek = troughIdx
+		result.TroughVelocity = troughVel
+	}
+
+	// Calculate 4-week moving average (most recent 4 weeks)
+	if numWeeks >= 4 {
+		sum4 := 0
+		for i := 0; i < 4; i++ {
+			sum4 += result.WeeklyVelocity[i].Closed
+		}
+		result.MovingAvg4Week = float64(sum4) / 4.0
+	}
+
+	// Calculate 8-week moving average if available
+	if numWeeks >= 8 {
+		sum8 := 0
+		for i := 0; i < 8; i++ {
+			sum8 += result.WeeklyVelocity[i].Closed
+		}
+		result.MovingAvg8Week = float64(sum8) / 8.0
+	}
+
+	// Calculate variance for consistency score
+	if numWeeks > 0 {
+		var sum float64
+		for _, snap := range result.WeeklyVelocity {
+			sum += float64(snap.Closed)
+		}
+		mean := sum / float64(numWeeks)
+
+		var variance float64
+		for _, snap := range result.WeeklyVelocity {
+			diff := float64(snap.Closed) - mean
+			variance += diff * diff
+		}
+		variance /= float64(numWeeks)
+		result.Variance = variance
+
+		// Consistency score: low variance relative to mean = high consistency
+		// Use coefficient of variation (CV) - lower is better
+		// CV = stddev / mean, so we invert it for the score
+		if mean > 0 {
+			stddev := variance // Approximate
+			if stddev > 0 {
+				stddev = variance / mean // Simple approximation
+			}
+			cv := stddev / mean
+			// CV of 0 = 100 score, CV of 1+ = 0 score
+			result.ConsistencyScore = clampScore(int(100 * (1 - cv)))
+		} else {
+			result.ConsistencyScore = 0 // No closures = no consistency score
+		}
+	}
+
+	return result
+}
+
+// ComputeAllHistoricalVelocity computes historical velocity for all labels
+func ComputeAllHistoricalVelocity(issues []model.Issue, numWeeks int, now time.Time) map[string]HistoricalVelocity {
+	labels := ExtractLabels(issues)
+	result := make(map[string]HistoricalVelocity, labels.LabelCount)
+
+	for _, label := range labels.Labels {
+		result[label] = ComputeHistoricalVelocity(issues, label, numWeeks, now)
+	}
+
+	return result
+}
+
+// GetVelocityTrend analyzes the historical velocity to detect trends
+// Returns "accelerating", "decelerating", "stable", or "erratic"
+func (hv *HistoricalVelocity) GetVelocityTrend() string {
+	if hv.WeeksAnalyzed < 4 {
+		return "insufficient_data"
+	}
+
+	// Compare first half vs second half of the period
+	halfPoint := hv.WeeksAnalyzed / 2
+	var recentSum, olderSum int
+
+	for i := 0; i < halfPoint; i++ {
+		recentSum += hv.WeeklyVelocity[i].Closed
+	}
+	for i := halfPoint; i < hv.WeeksAnalyzed; i++ {
+		olderSum += hv.WeeklyVelocity[i].Closed
+	}
+
+	if olderSum == 0 && recentSum > 0 {
+		return "accelerating"
+	}
+	if olderSum == 0 && recentSum == 0 {
+		return "stable"
+	}
+
+	ratio := float64(recentSum) / float64(olderSum)
+
+	switch {
+	case ratio > 1.3:
+		return "accelerating"
+	case ratio < 0.7:
+		return "decelerating"
+	case hv.Variance > float64(hv.PeakVelocity)*0.5:
+		return "erratic"
+	default:
+		return "stable"
+	}
+}
+
+// GetWeeklyAverage returns the average closures per week
+func (hv *HistoricalVelocity) GetWeeklyAverage() float64 {
+	if hv.WeeksAnalyzed == 0 {
+		return 0
+	}
+	var total int
+	for _, snap := range hv.WeeklyVelocity {
+		total += snap.Closed
+	}
+	return float64(total) / float64(hv.WeeksAnalyzed)
 }
 
