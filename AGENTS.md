@@ -67,6 +67,38 @@
 
 ---
 
+### Static Site Export for Stakeholder Reporting
+
+  Generate a static dashboard for non-technical stakeholders:
+
+  ```bash
+  # Interactive wizard (recommended)
+  bv --pages
+
+  # Or export locally
+  bv --export-pages ./dashboard --pages-title "Sprint 42 Status"
+  ```
+
+  The output is a self-contained HTML/JS bundle that:
+  - Shows triage recommendations (from --robot-triage)
+  - Visualizes dependencies
+  - Supports full-text search (FTS5)
+  - Works offline after initial load
+  - Requires no installation to view
+
+  **Deployment options:**
+  - `bv --pages` → Interactive wizard for GitHub Pages deployment
+  - `bv --export-pages ./dir` → Local export for custom hosting
+  - `bv --preview-pages ./dir` → Preview bundle locally
+
+  **For CI/CD integration:**
+  ```bash
+  bv --export-pages ./bv-pages --pages-title "Nightly Build"
+  # Then deploy ./bv-pages to your hosting of choice
+  ```
+
+---
+
 ### ast-grep vs ripgrep (quick guidance)
 
 **Use `ast-grep` when structure matters.** It parses code and matches AST nodes, so results ignore comments/strings, understand syntax, and can **safely rewrite** code.
