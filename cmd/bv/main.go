@@ -1709,6 +1709,44 @@ func formatCycle(cycle []string) string {
 	return result
 }
 
+// naturalLess compares two strings using natural sort order (numeric parts sorted numerically)
+func naturalLess(s1, s2 string) bool {
+	// Simple heuristic: if both strings end with numbers, compare the prefix then the number
+	// e.g. "bv-2" vs "bv-10" -> "bv-" == "bv-", 2 < 10
+	
+	// Helper to split into prefix and numeric suffix
+	split := func(s string) (string, int, bool) {
+		lastDigit := -1
+		for i := len(s) - 1; i >= 0; i-- {
+			if s[i] >= '0' && s[i] <= '9' {
+				lastDigit = i
+			} else {
+				break
+			}
+		}
+		if lastDigit == -1 {
+			return s, 0, false
+		}
+		// If the whole string is number, prefix is empty
+		prefix := s[:lastDigit]
+		numStr := s[lastDigit:]
+		num, err := strconv.Atoi(numStr)
+		if err != nil {
+			return s, 0, false
+		}
+		return prefix, num, true
+	}
+
+	p1, n1, ok1 := split(s1)
+	p2, n2, ok2 := split(s2)
+
+	if ok1 && ok2 && p1 == p2 {
+		return n1 < n2
+	}
+	
+	return s1 < s2
+}
+
 // applyRecipeFilters filters issues based on recipe configuration
 func applyRecipeFilters(issues []model.Issue, r *recipe.Recipe) []model.Issue {
 	if r == nil {
@@ -1907,7 +1945,7 @@ func applyRecipeSort(issues []model.Issue, r *recipe.Recipe) []model.Issue {
 		case "title":
 			less = strings.ToLower(issues[i].Title) < strings.ToLower(issues[j].Title)
 		case "id":
-			less = issues[i].ID < issues[j].ID
+			less = naturalLess(issues[i].ID, issues[j].ID)
 		case "status":
 			less = issues[i].Status < issues[j].Status
 		default:

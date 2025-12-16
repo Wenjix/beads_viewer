@@ -218,6 +218,18 @@ func TestApplyRecipeSort_DefaultsAndFields(t *testing.T) {
 		t.Fatalf("status sort expected A first, got %s", sorted[0].ID)
 	}
 
+	// ID natural sort
+	idIssues := []model.Issue{
+		{ID: "bv-10"},
+		{ID: "bv-2"},
+		{ID: "bv-1"},
+	}
+	r.Sort = recipe.SortConfig{Field: "id"}
+	sortedIDs := applyRecipeSort(append([]model.Issue{}, idIssues...), r)
+	if sortedIDs[0].ID != "bv-1" || sortedIDs[1].ID != "bv-2" || sortedIDs[2].ID != "bv-10" {
+		t.Fatalf("id natural sort failed: got %v", []string{sortedIDs[0].ID, sortedIDs[1].ID, sortedIDs[2].ID})
+	}
+
 	// Unknown field should preserve order
 	r.Sort = recipe.SortConfig{Field: "unknown"}
 	sorted = applyRecipeSort(append([]model.Issue{}, issues...), r)
