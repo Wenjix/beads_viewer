@@ -267,11 +267,14 @@ func generateDOT(issues []model.Issue, issueIDs map[string]bool, stats *analysis
 			title = title[:27] + "..."
 		}
 
+		// Escape quotes in ID for the label
+		escapedID := strings.ReplaceAll(i.ID, "\"", "\\\"")
+
 		// Status color
 		color := dotStatusColor(i.Status)
 
 		// Label with ID, title, priority
-		label := fmt.Sprintf("%s\\n%s\\nP%d %s", i.ID, title, i.Priority, i.Status)
+		label := fmt.Sprintf("%s\\n%s\\nP%d %s", escapedID, title, i.Priority, i.Status)
 
 		// PageRank affects penwidth
 		penwidth := 1.0

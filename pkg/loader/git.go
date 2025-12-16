@@ -124,7 +124,10 @@ func (g *GitLoader) ListRevisions(limit int) ([]RevisionInfo, error) {
 			continue
 		}
 
-		timestamp, _ := time.Parse(time.RFC3339, parts[1])
+		timestamp, err := time.Parse(time.RFC3339, parts[1])
+		if err != nil {
+			continue // skip revisions with unparseable timestamps
+		}
 		revisions = append(revisions, RevisionInfo{
 			SHA:       parts[0],
 			Timestamp: timestamp,
@@ -344,7 +347,10 @@ func (g *GitLoader) GetCommitsBetween(fromRev, toRev string) ([]RevisionInfo, er
 			continue
 		}
 
-		timestamp, _ := time.Parse(time.RFC3339, parts[1])
+		timestamp, err := time.Parse(time.RFC3339, parts[1])
+		if err != nil {
+			continue // skip revisions with unparseable timestamps
+		}
 		revisions = append(revisions, RevisionInfo{
 			SHA:       parts[0],
 			Timestamp: timestamp,

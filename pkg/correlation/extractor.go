@@ -80,7 +80,10 @@ type beadSnapshot struct {
 // Extract extracts bead lifecycle events from git history
 func (e *Extractor) Extract(opts ExtractOptions) ([]BeadEvent, error) {
 	// Build git log command
-	args := e.buildGitLogArgs(opts)
+	logArgs := e.buildGitLogArgs(opts)
+
+	// Inject config to disable colors (essential for parsing)
+	args := append([]string{"-c", "color.ui=false"}, logArgs...)
 
 	cmd := exec.Command("git", args...)
 	cmd.Dir = e.repoPath
@@ -263,7 +266,8 @@ func (e *Extractor) parseDiff(diffData []byte, info commitInfo, filterBeadID str
 	scanner := bufio.NewScanner(bytes.NewReader(diffData))
 	// Increase buffer for large diffs
 	const maxCapacity = 1024 * 1024 * 10 // 10MB
-	buf := make([]byte, maxCapacity)
+	// Start with 64KB buffer, grow up to maxCapacity
+	buf := make([]byte, 64*1024)
 	scanner.Buffer(buf, maxCapacity)
 
 	for scanner.Scan() {

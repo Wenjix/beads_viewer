@@ -173,7 +173,7 @@ func (e *SQLiteExporter) insertIssues(db *sql.DB) error {
 	defer stmt.Close()
 
 	for _, issue := range e.Issues {
-		labels := ""
+		labels := "[]"
 		if len(issue.Labels) > 0 {
 			labelsJSON, _ := json.Marshal(issue.Labels)
 			labels = string(labelsJSON)

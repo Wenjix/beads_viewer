@@ -49,8 +49,11 @@ func truncateRunesHelper(s string, maxRunes int, suffix string) string {
 	}
 
 	suffixLen := utf8.RuneCountInString(suffix)
-	if maxRunes <= suffixLen {
-		return suffix
+	if suffixLen > maxRunes {
+		// If suffix implies more characters than allowed, truncate the suffix itself
+		// to strictly obey maxRunes constraint.
+		rSuffix := []rune(suffix)
+		return string(rSuffix[:maxRunes])
 	}
 
 	runes := []rune(s)
