@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"golang.org/x/term"
+	"io"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 
 	"github.com/Dicklesworthstone/beads_viewer/pkg/analysis"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/baseline"
@@ -51,6 +55,8 @@ func main() {
 	robotMaxResults := flag.Int("robot-max-results", 0, "Limit robot output count (0 = use defaults)")
 	robotByLabel := flag.String("robot-by-label", "", "Filter robot outputs by label (exact match)")
 	robotByAssignee := flag.String("robot-by-assignee", "", "Filter robot outputs by assignee (exact match)")
+	// Label subgraph scoping (bv-122)
+	labelScope := flag.String("label", "", "Scope analysis to label's subgraph (affects --robot-insights, --robot-plan, --robot-priority)")
 	alertSeverity := flag.String("severity", "", "Filter robot alerts by severity (info|warning|critical)")
 	alertType := flag.String("alert-type", "", "Filter robot alerts by alert type (e.g., stale_issue)")
 	alertLabel := flag.String("alert-label", "", "Filter robot alerts by label match")
@@ -73,7 +79,19 @@ func main() {
 	historySince := flag.String("history-since", "", "Limit history to commits after this date/ref (e.g., '30 days ago', '2024-01-01')")
 	historyLimit := flag.Int("history-limit", 500, "Max commits to analyze (0 = unlimited)")
 	minConfidence := flag.Float64("min-confidence", 0.0, "Filter correlations by minimum confidence (0.0-1.0)")
+	// Static pages export flags (bv-73f)
+	exportPages := flag.String("export-pages", "", "Export static site to directory (e.g., ./bv-pages)")
+	pagesTitle := flag.String("pages-title", "", "Custom title for static site")
+	pagesIncludeClosed := flag.Bool("pages-include-closed", false, "Include closed issues in export")
+	previewPages := flag.String("preview-pages", "", "Preview existing static site bundle")
 	flag.Parse()
+
+	// Ensure static export flags are retained even when build tags strip features in some environments.
+	_ = exportPages
+	_ = pagesTitle
+	_ = pagesIncludeClosed
+	_ = previewPages
+	_ = labelScope
 
 	envRobot := os.Getenv("BV_ROBOT") == "1"
 	stdoutIsTTY := term.IsTerminal(int(os.Stdout.Fd()))
@@ -255,6 +273,13 @@ func main() {
 		fmt.Println("      --robot-by-label bug          Filter by label (exact match)")
 		fmt.Println("      --robot-by-assignee alice     Filter by assignee (exact match)")
 		fmt.Println("")
+		fmt.Println("  Label Subgraph Scoping (bv-122):")
+		fmt.Println("      --label LABEL                 Scope analysis to label's subgraph")
+		fmt.Println("      Affects: --robot-insights, --robot-plan, --robot-priority")
+		fmt.Println("      Filters issues to those with the label, then runs analysis on subgraph.")
+		fmt.Println("      Includes label_scope and label_context in output with health metrics.")
+		fmt.Println("      Example: bv --robot-insights --label api")
+		fmt.Println("")
 		fmt.Println("  --robot-triage / --robot-next")
 		fmt.Println("      Unified triage (mega command) or single top pick. QuickRef includes top picks, quick_wins, blockers_to_clear.")
 		fmt.Println("")
@@ -430,6 +455,123 @@ func main() {
 
 	// Stable data hash for robot outputs (after repo filter but before recipes/TUI)
 	dataHash := analysis.ComputeDataHash(issues)
+
+	// Label subgraph scoping (bv-122)
+	// When --label is specified, extract the label's subgraph and use it for all robot analysis.
+	// This includes label health context in the output.
+	var labelScopeContext *analysis.LabelHealth
+	if *labelScope != "" {
+		sg := analysis.ComputeLabelSubgraph(issues, *labelScope)
+		if sg.IssueCount == 0 {
+			fmt.Fprintf(os.Stderr, "Warning: No issues found with label %q\n", *labelScope)
+		} else {
+			// Replace issues with the subgraph issues
+			subgraphIssues := make([]model.Issue, 0, len(sg.AllIssues))
+			for _, id := range sg.AllIssues {
+				if iss, ok := sg.IssueMap[id]; ok {
+					subgraphIssues = append(subgraphIssues, iss)
+				}
+			}
+			issues = subgraphIssues
+			// Compute label health for context
+			cfg := analysis.DefaultLabelHealthConfig()
+			allHealth := analysis.ComputeAllLabelHealth(issues, cfg, time.Now().UTC(), nil)
+			for i := range allHealth.Labels {
+				if allHealth.Labels[i].Label == *labelScope {
+					labelScopeContext = &allHealth.Labels[i]
+					break
+				}
+			}
+		}
+	}
+
+	// Handle --preview-pages (before export since it doesn't need analysis)
+	if *previewPages != "" {
+		if err := runPreviewServer(*previewPages); err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting preview server: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	// Handle --export-pages (bv-73f)
+	if *exportPages != "" {
+		fmt.Println("Exporting static site...")
+		fmt.Printf("  → Loading %d issues\n", len(issues))
+
+		// Filter closed issues if not requested
+		exportIssues := issues
+		if !*pagesIncludeClosed {
+			var openIssues []model.Issue
+			for _, issue := range issues {
+				if issue.Status != model.StatusClosed {
+					openIssues = append(openIssues, issue)
+				}
+			}
+			exportIssues = openIssues
+			fmt.Printf("  → Filtering to %d open issues\n", len(exportIssues))
+		}
+
+		// Build graph and compute stats
+		fmt.Println("  → Running graph analysis...")
+		analyzer := analysis.NewAnalyzer(exportIssues)
+		stats := analyzer.AnalyzeAsync()
+		stats.WaitForPhase2()
+
+		// Compute triage
+		fmt.Println("  → Generating triage data...")
+		triage := analysis.ComputeTriage(exportIssues)
+
+		// Extract dependencies
+		var deps []*model.Dependency
+		for i := range exportIssues {
+			issue := &exportIssues[i]
+			for _, dep := range issue.Dependencies {
+				if dep == nil || !dep.Type.IsBlocking() {
+					continue
+				}
+				deps = append(deps, &model.Dependency{
+					IssueID:     issue.ID,
+					DependsOnID: dep.DependsOnID,
+					Type:        dep.Type,
+				})
+			}
+		}
+
+		// Create exporter
+		issuePointers := make([]*model.Issue, len(exportIssues))
+		for i := range exportIssues {
+			issuePointers[i] = &exportIssues[i]
+		}
+		exporter := export.NewSQLiteExporter(issuePointers, deps, stats, &triage)
+		if *pagesTitle != "" {
+			exporter.Config.Title = *pagesTitle
+		}
+
+		// Export SQLite database
+		fmt.Println("  → Writing database and JSON files...")
+		if err := exporter.Export(*exportPages); err != nil {
+			fmt.Fprintf(os.Stderr, "Error exporting: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Copy viewer assets
+		fmt.Println("  → Copying viewer assets...")
+		if err := copyViewerAssets(*exportPages); err != nil {
+			fmt.Fprintf(os.Stderr, "Error copying assets: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println("")
+		fmt.Printf("✓ Static site exported to: %s\n", *exportPages)
+		fmt.Println("")
+		fmt.Println("To preview locally:")
+		fmt.Printf("  bv --preview-pages %s\n", *exportPages)
+		fmt.Println("")
+		fmt.Println("Or open in browser:")
+		fmt.Printf("  open %s/index.html\n", *exportPages)
+		os.Exit(0)
+	}
 
 	// Handle --robot-label-health
 	if *robotLabelHealth {
@@ -962,6 +1104,8 @@ func main() {
 			DataHash       string                  `json:"data_hash"`
 			AnalysisConfig analysis.AnalysisConfig `json:"analysis_config"`
 			Status         analysis.MetricStatus   `json:"status"`
+			LabelScope     string                  `json:"label_scope,omitempty"`   // bv-122: Label filter applied
+			LabelContext   *analysis.LabelHealth   `json:"label_context,omitempty"` // bv-122: Health context for scoped label
 			analysis.Insights
 			FullStats        interface{}                `json:"full_stats"`
 			TopWhatIfs       []analysis.WhatIfEntry     `json:"top_what_ifs,omitempty"`      // Issues with highest downstream impact (bv-83)
@@ -972,6 +1116,8 @@ func main() {
 			DataHash:         dataHash,
 			AnalysisConfig:   stats.Config,
 			Status:           stats.Status(),
+			LabelScope:       *labelScope,
+			LabelContext:     labelScopeContext,
 			Insights:         insights,
 			FullStats:        fullStats,
 			TopWhatIfs:       topWhatIfs,
@@ -1016,6 +1162,8 @@ func main() {
 			DataHash       string                  `json:"data_hash"`
 			AnalysisConfig analysis.AnalysisConfig `json:"analysis_config"`
 			Status         analysis.MetricStatus   `json:"status"`
+			LabelScope     string                  `json:"label_scope,omitempty"`   // bv-122: Label filter applied
+			LabelContext   *analysis.LabelHealth   `json:"label_context,omitempty"` // bv-122: Health context for scoped label
 			Plan           analysis.ExecutionPlan  `json:"plan"`
 			UsageHints     []string                `json:"usage_hints"` // bv-84: Agent-friendly hints
 		}{
@@ -1023,6 +1171,8 @@ func main() {
 			DataHash:       dataHash,
 			AnalysisConfig: cfg,
 			Status:         status,
+			LabelScope:     *labelScope,
+			LabelContext:   labelScopeContext,
 			Plan:           plan,
 			UsageHints: []string{
 				"jq '.plan.tracks | length' - Number of parallel execution tracks",
@@ -1119,6 +1269,8 @@ func main() {
 			DataHash          string                                    `json:"data_hash"`
 			AnalysisConfig    analysis.AnalysisConfig                   `json:"analysis_config"`
 			Status            analysis.MetricStatus                     `json:"status"`
+			LabelScope        string                                    `json:"label_scope,omitempty"`   // bv-122: Label filter applied
+			LabelContext      *analysis.LabelHealth                     `json:"label_context,omitempty"` // bv-122: Health context for scoped label
 			Recommendations   []analysis.EnhancedPriorityRecommendation `json:"recommendations"`
 			FieldDescriptions map[string]string                         `json:"field_descriptions"`
 			Filters           struct {
@@ -1138,6 +1290,8 @@ func main() {
 			DataHash:          dataHash,
 			AnalysisConfig:    cfg,
 			Status:            status,
+			LabelScope:        *labelScope,
+			LabelContext:      labelScopeContext,
 			Recommendations:   recommendations,
 			FieldDescriptions: analysis.DefaultFieldDescriptions(),
 			Usage: []string{
@@ -1713,7 +1867,7 @@ func formatCycle(cycle []string) string {
 func naturalLess(s1, s2 string) bool {
 	// Simple heuristic: if both strings end with numbers, compare the prefix then the number
 	// e.g. "bv-2" vs "bv-10" -> "bv-" == "bv-", 2 < 10
-	
+
 	// Helper to split into prefix and numeric suffix
 	split := func(s string) (string, int, bool) {
 		lastDigit := -1
@@ -1743,7 +1897,7 @@ func naturalLess(s1, s2 string) bool {
 	if ok1 && ok2 && p1 == p2 {
 		return n1 < n2
 	}
-	
+
 	return s1 < s2
 }
 
@@ -2284,4 +2438,193 @@ func buildAttentionReason(score analysis.LabelAttentionScore) string {
 	}
 
 	return strings.Join(parts, ", ")
+}
+
+// ============================================================================
+// Static Pages Export Helpers (bv-73f)
+// ============================================================================
+
+// copyViewerAssets copies the viewer HTML/JS/CSS assets to the output directory.
+func copyViewerAssets(outputDir string) error {
+	// Get the path to the viewer assets embedded in the binary or relative to the executable
+	// For development, we look relative to the project root
+	// For production, assets should be embedded using go:embed
+
+	// Find viewer assets directory
+	assetsDir := findViewerAssetsDir()
+	if assetsDir == "" {
+		return fmt.Errorf("viewer assets not found")
+	}
+
+	// Files to copy
+	files := []string{
+		"index.html",
+		"viewer.js",
+		"styles.css",
+		"graph.js",
+		"coi-serviceworker.js",
+	}
+
+	for _, file := range files {
+		src := filepath.Join(assetsDir, file)
+		dst := filepath.Join(outputDir, file)
+
+		if err := copyFile(src, dst); err != nil {
+			// Skip missing optional files
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("copy %s: %w", file, err)
+		}
+	}
+
+	// Copy vendor directory
+	vendorSrc := filepath.Join(assetsDir, "vendor")
+	vendorDst := filepath.Join(outputDir, "vendor")
+	if err := copyDir(vendorSrc, vendorDst); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("copy vendor: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// findViewerAssetsDir locates the viewer assets directory.
+func findViewerAssetsDir() string {
+	// Try relative to current working directory (development)
+	candidates := []string{
+		"pkg/export/viewer_assets",
+		"../pkg/export/viewer_assets",
+		"../../pkg/export/viewer_assets",
+	}
+
+	// Try relative to executable
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "pkg/export/viewer_assets"),
+			filepath.Join(exeDir, "../pkg/export/viewer_assets"),
+			filepath.Join(exeDir, "../../pkg/export/viewer_assets"),
+		)
+	}
+
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+
+	return ""
+}
+
+// copyFile copies a single file.
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	return err
+}
+
+// copyDir recursively copies a directory.
+func copyDir(src, dst string) error {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(dst, srcInfo.Mode()); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.IsDir() {
+			if err := copyDir(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else {
+			if err := copyFile(srcPath, dstPath); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// runPreviewServer starts a local HTTP server to preview the static site.
+func runPreviewServer(dir string) error {
+	// Check directory exists
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("directory not found: %s", dir)
+	}
+
+	// Check for index.html
+	indexPath := filepath.Join(dir, "index.html")
+	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+		return fmt.Errorf("index.html not found in %s (did you run --export-pages first?)", dir)
+	}
+
+	port := 9000
+	fmt.Printf("Starting preview server at http://localhost:%d\n", port)
+	fmt.Printf("Serving files from: %s\n", dir)
+	fmt.Println("Press Ctrl+C to stop")
+	fmt.Println("")
+
+	// Try to open browser
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		openBrowser(fmt.Sprintf("http://localhost:%d", port))
+	}()
+
+	// Start HTTP server
+	http.Handle("/", http.FileServer(http.Dir(dir)))
+	return http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
+}
+
+// openBrowser opens the default browser to the given URL.
+func openBrowser(url string) {
+	var cmd string
+	var args []string
+
+	switch {
+	case isCommandAvailable("open"):
+		cmd = "open"
+		args = []string{url}
+	case isCommandAvailable("xdg-open"):
+		cmd = "xdg-open"
+		args = []string{url}
+	case isCommandAvailable("cmd"):
+		cmd = "cmd"
+		args = []string{"/c", "start", url}
+	default:
+		fmt.Printf("Open %s in your browser\n", url)
+		return
+	}
+
+	exec.Command(cmd, args...).Start()
+}
+
+// isCommandAvailable checks if a command is available in PATH.
+func isCommandAvailable(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
