@@ -1627,6 +1627,7 @@
   <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
   <script>
     // Initialize Mermaid with theme based on dark mode state
+    // Uses Dracula-inspired colors for dark mode, GitHub-inspired for light mode
     function getMermaidConfig() {
       const dark = document.documentElement.classList.contains('dark');
       return {
@@ -1635,13 +1636,38 @@
         flowchart: { curve: 'basis', padding: 10 },
         securityLevel: 'strict',
         themeVariables: dark ? {
-          primaryColor: '#4f46e5',
-          primaryTextColor: '#f9fafb',
-          primaryBorderColor: '#6366f1',
-          lineColor: '#6b7280',
-          secondaryColor: '#1f2937',
-          tertiaryColor: '#374151'
-        } : {}
+          // Dracula-inspired dark theme
+          primaryColor: '#bd93f9',      // Purple
+          primaryTextColor: '#f8f8f2',  // Foreground
+          primaryBorderColor: '#ff79c6', // Pink
+          lineColor: '#6272a4',         // Muted (comment)
+          secondaryColor: '#44475a',    // Background secondary
+          tertiaryColor: '#282a36',     // Background
+          background: '#282a36',
+          mainBkg: '#282a36',
+          nodeBorder: '#bd93f9',
+          clusterBkg: '#44475a',
+          clusterBorder: '#6272a4',
+          titleColor: '#f8f8f2',
+          edgeLabelBackground: '#44475a',
+          nodeTextColor: '#f8f8f2'
+        } : {
+          // GitHub-inspired light theme
+          primaryColor: '#8250df',      // Purple
+          primaryTextColor: '#24292f',  // Foreground
+          primaryBorderColor: '#bf3989', // Pink
+          lineColor: '#57606a',         // Muted
+          secondaryColor: '#f6f8fa',    // Background secondary
+          tertiaryColor: '#ffffff',     // Background
+          background: '#ffffff',
+          mainBkg: '#ffffff',
+          nodeBorder: '#8250df',
+          clusterBkg: '#f6f8fa',
+          clusterBorder: '#d0d7de',
+          titleColor: '#24292f',
+          edgeLabelBackground: '#f6f8fa',
+          nodeTextColor: '#24292f'
+        }
       };
     }
     mermaid.initialize(getMermaidConfig());
