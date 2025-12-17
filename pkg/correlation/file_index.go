@@ -142,6 +142,12 @@ func BuildFileIndex(report *HistoryReport) *FileBeadIndex {
 
 // NewFileLookup creates a file lookup from a history report.
 func NewFileLookup(report *HistoryReport) *FileLookup {
+	if report == nil {
+		return &FileLookup{
+			index: BuildFileIndex(nil),
+			beads: make(map[string]BeadHistory),
+		}
+	}
 	return &FileLookup{
 		index: BuildFileIndex(report),
 		beads: report.Histories,
@@ -179,8 +185,9 @@ func (fl *FileLookup) LookupByFile(path string) *FileBeadLookupResult {
 	}
 
 	// Try prefix match for directory lookups
+	// Note: normalizePath converts all backslashes to forward slashes, so we only need to check "/"
 	for filePath, refs := range fl.index.FileToBeads {
-		if strings.HasPrefix(filePath, normalizedPath+"/") || strings.HasPrefix(filePath, normalizedPath+"\\") {
+		if strings.HasPrefix(filePath, normalizedPath+"/") {
 			for _, ref := range refs {
 				// Get current status
 				if history, ok := fl.beads[ref.BeadID]; ok {
@@ -295,10 +302,15 @@ func (fl *FileLookup) GetHotspots(limit int) []FileHotspot {
 	for i := 0; i < limit; i++ {
 		c := counts[i]
 
-		// Count open vs closed
+		// Count open vs closed using current status from fl.beads
 		openCount := 0
 		for _, ref := range c.refs {
-			if ref.Status != "closed" {
+			// Get current status from beads map (may have changed since index was built)
+			status := ref.Status
+			if history, ok := fl.beads[ref.BeadID]; ok {
+				status = history.Status
+			}
+			if status != "closed" {
 				openCount++
 			}
 		}

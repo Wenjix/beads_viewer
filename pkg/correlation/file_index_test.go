@@ -118,6 +118,38 @@ func TestBuildFileIndexEmpty(t *testing.T) {
 	}
 }
 
+func TestNewFileLookupNil(t *testing.T) {
+	// NewFileLookup should not panic with nil report
+	lookup := NewFileLookup(nil)
+	if lookup == nil {
+		t.Fatal("Expected non-nil lookup for nil report")
+	}
+
+	// Should return empty results for any lookup
+	result := lookup.LookupByFile("any/path.go")
+	if result.TotalBeads != 0 {
+		t.Errorf("Expected 0 beads for nil report lookup, got %d", result.TotalBeads)
+	}
+
+	// GetHotspots should return empty slice
+	hotspots := lookup.GetHotspots(10)
+	if len(hotspots) != 0 {
+		t.Errorf("Expected 0 hotspots for nil report, got %d", len(hotspots))
+	}
+
+	// GetAllFiles should return empty slice
+	files := lookup.GetAllFiles()
+	if len(files) != 0 {
+		t.Errorf("Expected 0 files for nil report, got %d", len(files))
+	}
+
+	// GetStats should return zero stats
+	stats := lookup.GetStats()
+	if stats.TotalFiles != 0 || stats.TotalBeadLinks != 0 {
+		t.Errorf("Expected zero stats for nil report, got %+v", stats)
+	}
+}
+
 func TestFileLookupByFile(t *testing.T) {
 	now := time.Now()
 	report := &HistoryReport{
