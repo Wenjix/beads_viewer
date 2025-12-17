@@ -696,7 +696,7 @@ func (w *Wizard) PrintSuccess(result *WizardResult) {
 
 	// Content lines (left-aligned with 2-space indent)
 	for _, line := range lines[1:] {
-		fmt.Printf("║  %-*s║\n", width-3, line)
+		fmt.Printf("║  %-*s ║\n", width-3, line)
 	}
 
 	fmt.Print("╚")
