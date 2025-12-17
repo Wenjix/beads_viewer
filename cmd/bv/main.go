@@ -2897,9 +2897,6 @@ func main() {
 		// Auto-enable robot diff for non-interactive/agent contexts
 		if !*robotDiff && (envRobot || !stdoutIsTTY) {
 			*robotDiff = true
-			if stdoutIsTTY {
-				fmt.Fprintln(os.Stderr, "Auto-enabled --robot-diff for non-interactive output; pass --robot-diff explicitly to control format.")
-			}
 		}
 
 		cwd, err := os.Getwd()

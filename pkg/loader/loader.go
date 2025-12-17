@@ -198,7 +198,7 @@ func ParseIssuesWithOptions(r io.Reader, opts ParseOptions) ([]model.Issue, erro
 
 	reader := bufio.NewReaderSize(r, maxCapacity)
 
-	// Default warning handler prints to stderr
+	// Default warning handler prints to stderr (suppressed in robot mode).
 	warn := opts.WarningHandler
 	if warn == nil {
 		if os.Getenv("BV_ROBOT") == "1" {
