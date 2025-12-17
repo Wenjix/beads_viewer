@@ -360,6 +360,108 @@ func (s *GraphStats) Slack() map[string]float64 {
 	return cp
 }
 
+// Ranks accessors
+
+func (s *GraphStats) PageRankRank() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.pageRankRank == nil {
+		return nil
+	}
+	cp := make(map[string]int, len(s.pageRankRank))
+	for k, v := range s.pageRankRank {
+		cp[k] = v
+	}
+	return cp
+}
+
+func (s *GraphStats) BetweennessRank() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.betweennessRank == nil {
+		return nil
+	}
+	cp := make(map[string]int, len(s.betweennessRank))
+	for k, v := range s.betweennessRank {
+		cp[k] = v
+	}
+	return cp
+}
+
+func (s *GraphStats) EigenvectorRank() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.eigenvectorRank == nil {
+		return nil
+	}
+	cp := make(map[string]int, len(s.eigenvectorRank))
+	for k, v := range s.eigenvectorRank {
+		cp[k] = v
+	}
+	return cp
+}
+
+func (s *GraphStats) HubsRank() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.hubsRank == nil {
+		return nil
+	}
+	cp := make(map[string]int, len(s.hubsRank))
+	for k, v := range s.hubsRank {
+		cp[k] = v
+	}
+	return cp
+}
+
+func (s *GraphStats) AuthoritiesRank() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.authoritiesRank == nil {
+		return nil
+	}
+	cp := make(map[string]int, len(s.authoritiesRank))
+	for k, v := range s.authoritiesRank {
+		cp[k] = v
+	}
+	return cp
+}
+
+func (s *GraphStats) CriticalPathRank() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.criticalPathRank == nil {
+		return nil
+	}
+	cp := make(map[string]int, len(s.criticalPathRank))
+	for k, v := range s.criticalPathRank {
+		cp[k] = v
+	}
+	return cp
+}
+
+func (s *GraphStats) InDegreeRank() map[string]int {
+	if s.inDegreeRank == nil {
+		return nil
+	}
+	cp := make(map[string]int, len(s.inDegreeRank))
+	for k, v := range s.inDegreeRank {
+		cp[k] = v
+	}
+	return cp
+}
+
+func (s *GraphStats) OutDegreeRank() map[string]int {
+	if s.outDegreeRank == nil {
+		return nil
+	}
+	cp := make(map[string]int, len(s.outDegreeRank))
+	for k, v := range s.outDegreeRank {
+		cp[k] = v
+	}
+	return cp
+}
+
 // Cycles returns a copy of detected cycles. Safe for concurrent iteration.
 // Returns nil if Phase 2 is not yet complete.
 func (s *GraphStats) Cycles() [][]string {
@@ -458,7 +560,8 @@ func NewAnalyzer(issues []model.Issue) *Analyzer {
 			v, exists := idToNode[dep.DependsOnID]
 			if exists {
 				// Issue (u) depends on v → edge u -> v
-				g.SetEdge(g.NewEdge(g.Node(u), g.Node(v)))
+				// Optimization: Use simple.Node directly to avoid internal map lookups in g.Node()
+				g.SetEdge(g.NewEdge(simple.Node(u), simple.Node(v)))
 			}
 		}
 	}
@@ -913,6 +1016,14 @@ func (a *Analyzer) computePhase2WithProfile(ctx context.Context, stats *GraphSta
 	localSlack = a.computeSlack()
 	profile.Slack = time.Since(slackStart)
 
+	// Compute ranks (background optimization)
+	localPageRankRank := computeFloatRanks(localPageRank)
+	localBetweennessRank := computeFloatRanks(localBetweenness)
+	localEigenvectorRank := computeFloatRanks(localEigenvector)
+	localHubsRank := computeFloatRanks(localHubs)
+	localAuthoritiesRank := computeFloatRanks(localAuthorities)
+	localCriticalPathRank := computeFloatRanks(localCriticalPath)
+
 	// Atomic assignment
 	stats.mu.Lock()
 	stats.pageRank = localPageRank
@@ -925,6 +1036,15 @@ func (a *Analyzer) computePhase2WithProfile(ctx context.Context, stats *GraphSta
 	stats.articulation = localArticulation
 	stats.slack = localSlack
 	stats.cycles = localCycles
+
+	// Assign ranks
+	stats.pageRankRank = localPageRankRank
+	stats.betweennessRank = localBetweennessRank
+	stats.eigenvectorRank = localEigenvectorRank
+	stats.hubsRank = localHubsRank
+	stats.authoritiesRank = localAuthoritiesRank
+	stats.criticalPathRank = localCriticalPathRank
+
 	stats.phase2Ready = true
 
 	cycleReason := config.CyclesSkipReason
