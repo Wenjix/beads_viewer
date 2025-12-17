@@ -117,6 +117,9 @@ func WaitForPhase2Cmd(stats *analysis.GraphStats) tea.Cmd {
 // FileChangedMsg is sent when the beads file changes on disk
 type FileChangedMsg struct{}
 
+// semanticDebounceTickMsg is sent after debounce delay to trigger semantic computation
+type semanticDebounceTickMsg struct{}
+
 // WatchFileCmd returns a command that waits for file changes and sends FileChangedMsg
 func WatchFileCmd(w *watcher.Watcher) tea.Cmd {
 	return func() tea.Msg {
@@ -773,6 +776,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.list.SetFilterText(filterText)
 			if prevState == list.Filtering {
 				m.list.SetFilterState(list.Filtering)
+			}
+		}
+
+	case SemanticFilterResultMsg:
+		// Async semantic filter results arrived - cache and refresh list
+		if m.semanticSearch != nil && msg.Results != nil {
+			m.semanticSearch.SetCachedResults(msg.Term, msg.Results)
+
+			// Refresh list if still filtering with the same term
+			currentTerm := m.list.FilterInput.Value()
+			if m.semanticSearchEnabled && currentTerm == msg.Term {
+				prevState := m.list.FilterState()
+				m.list.SetFilterText(currentTerm)
+				if prevState == list.Filtering {
+					m.list.SetFilterState(list.Filtering)
+				}
+			}
+		}
+
+	case semanticDebounceTickMsg:
+		// Debounce timer expired - check if we should trigger semantic computation
+		if m.semanticSearchEnabled && m.semanticSearch != nil && m.list.FilterState() != list.Unfiltered {
+			pendingTerm := m.semanticSearch.GetPendingTerm()
+			if pendingTerm != "" && time.Since(m.semanticSearch.GetLastQueryTime()) >= 150*time.Millisecond {
+				return m, ComputeSemanticFilterCmd(m.semanticSearch, pendingTerm)
 			}
 		}
 
@@ -1866,6 +1894,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Update viewport if list selection changed in split view
 	if m.isSplitView && m.focused == focusList {
 		m.updateViewportContent()
+	}
+
+	// Trigger async semantic computation if needed (debounced)
+	if m.semanticSearchEnabled && m.semanticSearch != nil && m.list.FilterState() != list.Unfiltered {
+		pendingTerm := m.semanticSearch.GetPendingTerm()
+		if pendingTerm != "" {
+			// Debounce: only compute if 150ms since last query change
+			if time.Since(m.semanticSearch.GetLastQueryTime()) >= 150*time.Millisecond {
+				cmds = append(cmds, ComputeSemanticFilterCmd(m.semanticSearch, pendingTerm))
+			} else {
+				// Schedule a tick to check again after debounce period
+				cmds = append(cmds, tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
+					return semanticDebounceTickMsg{}
+				}))
+			}
+		}
 	}
 
 	return m, tea.Batch(cmds...)

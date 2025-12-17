@@ -312,8 +312,12 @@ func InitAndPush(bundlePath string, repoFullName string, forceOverwrite bool) er
 	pushCmd := exec.Command("git", pushArgs...)
 	pushCmd.Dir = bundlePath
 	if output, err := pushCmd.CombinedOutput(); err != nil {
-		// If force-with-lease fails, try regular force for new repos
-		if strings.Contains(string(output), "cannot be resolved") {
+		// If force-with-lease fails, try regular force
+		// This handles: "cannot be resolved", "stale info", and other lease failures
+		outputStr := string(output)
+		if strings.Contains(outputStr, "cannot be resolved") ||
+			strings.Contains(outputStr, "stale info") ||
+			strings.Contains(outputStr, "force-with-lease") {
 			pushCmd = exec.Command("git", "push", "-u", "origin", "main", "--force")
 			pushCmd.Dir = bundlePath
 			if output, err := pushCmd.CombinedOutput(); err != nil {
