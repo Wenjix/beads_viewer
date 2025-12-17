@@ -250,21 +250,42 @@ func TestGetExportedIssues(t *testing.T) {
 		t.Fatalf("Expected 2 exported issues, got %d", len(exported))
 	}
 
-	// Find issue get-2 and verify it has blocking info
-	var found bool
+	// Verify blocking relationships:
+	// get-2 depends on get-1, so get-1 blocks get-2
+	var foundGet1, foundGet2 bool
 	for _, e := range exported {
-		if e.ID == "get-2" {
-			found = true
+		switch e.ID {
+		case "get-1":
+			foundGet1 = true
+			// get-1 blocks get-2
 			if e.BlocksCount != 1 {
-				t.Errorf("Expected blocks_count 1, got %d", e.BlocksCount)
+				t.Errorf("get-1: expected blocks_count 1, got %d", e.BlocksCount)
 			}
-			if len(e.BlocksIDs) != 1 || e.BlocksIDs[0] != "get-1" {
-				t.Errorf("Expected blocks_ids ['get-1'], got %v", e.BlocksIDs)
+			if len(e.BlocksIDs) != 1 || e.BlocksIDs[0] != "get-2" {
+				t.Errorf("get-1: expected blocks_ids ['get-2'], got %v", e.BlocksIDs)
+			}
+			if e.BlockedByCount != 0 {
+				t.Errorf("get-1: expected blocked_by_count 0, got %d", e.BlockedByCount)
+			}
+		case "get-2":
+			foundGet2 = true
+			// get-2 is blocked by get-1
+			if e.BlockedByCount != 1 {
+				t.Errorf("get-2: expected blocked_by_count 1, got %d", e.BlockedByCount)
+			}
+			if len(e.BlockedByIDs) != 1 || e.BlockedByIDs[0] != "get-1" {
+				t.Errorf("get-2: expected blocked_by_ids ['get-1'], got %v", e.BlockedByIDs)
+			}
+			if e.BlocksCount != 0 {
+				t.Errorf("get-2: expected blocks_count 0, got %d", e.BlocksCount)
 			}
 		}
 	}
 
-	if !found {
+	if !foundGet1 {
+		t.Error("Issue get-1 not found in exported issues")
+	}
+	if !foundGet2 {
 		t.Error("Issue get-2 not found in exported issues")
 	}
 }

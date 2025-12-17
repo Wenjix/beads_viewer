@@ -110,11 +110,12 @@ func TestSQLiteExporter_InsertsMetricsAndTriageRecommendations(t *testing.T) {
 	if math.Abs(score-0.9) > 1e-9 {
 		t.Fatalf("triage_score expected 0.9, got %v", score)
 	}
-	if blocks != 1 {
-		t.Fatalf("blocks_count expected 1, got %d", blocks)
+	// A depends on B, so A is blocked by B (blocks=0, blockedBy=1)
+	if blocks != 0 {
+		t.Fatalf("blocks_count for A expected 0, got %d", blocks)
 	}
-	if blockedBy != 0 {
-		t.Fatalf("blocked_by_count expected 0, got %d", blockedBy)
+	if blockedBy != 1 {
+		t.Fatalf("blocked_by_count for A expected 1, got %d", blockedBy)
 	}
 
 	row = db.QueryRow(`SELECT triage_score, blocks_count, blocked_by_count FROM issue_metrics WHERE issue_id = ?`, "B")
@@ -124,11 +125,12 @@ func TestSQLiteExporter_InsertsMetricsAndTriageRecommendations(t *testing.T) {
 	if math.Abs(score-0.0) > 1e-9 {
 		t.Fatalf("triage_score for B expected 0.0, got %v", score)
 	}
-	if blocks != 0 {
-		t.Fatalf("blocks_count for B expected 0, got %d", blocks)
+	// A depends on B, so B blocks A (blocks=1, blockedBy=0)
+	if blocks != 1 {
+		t.Fatalf("blocks_count for B expected 1, got %d", blocks)
 	}
-	if blockedBy != 1 {
-		t.Fatalf("blocked_by_count for B expected 1, got %d", blockedBy)
+	if blockedBy != 0 {
+		t.Fatalf("blocked_by_count for B expected 0, got %d", blockedBy)
 	}
 
 	var action string

@@ -259,8 +259,11 @@ func (e *SQLiteExporter) insertMetrics(db *sql.DB) error {
 	blockedByCount := make(map[string]int)
 	for _, dep := range e.Deps {
 		if dep != nil && dep.Type.IsBlocking() {
-			blocksCount[dep.IssueID]++
-			blockedByCount[dep.DependsOnID]++
+			// dep.IssueID depends on dep.DependsOnID, so:
+			// - DependsOnID blocks IssueID
+			// - IssueID is blocked by DependsOnID
+			blocksCount[dep.DependsOnID]++
+			blockedByCount[dep.IssueID]++
 		}
 	}
 
@@ -501,8 +504,11 @@ func (e *SQLiteExporter) GetExportedIssues() []ExportIssue {
 	blockedByIDs := make(map[string][]string)
 	for _, dep := range e.Deps {
 		if dep != nil && dep.Type.IsBlocking() {
-			blocksIDs[dep.IssueID] = append(blocksIDs[dep.IssueID], dep.DependsOnID)
-			blockedByIDs[dep.DependsOnID] = append(blockedByIDs[dep.DependsOnID], dep.IssueID)
+			// dep.IssueID depends on dep.DependsOnID, so:
+			// - DependsOnID blocks IssueID
+			// - IssueID is blocked by DependsOnID
+			blocksIDs[dep.DependsOnID] = append(blocksIDs[dep.DependsOnID], dep.IssueID)
+			blockedByIDs[dep.IssueID] = append(blockedByIDs[dep.IssueID], dep.DependsOnID)
 		}
 	}
 
