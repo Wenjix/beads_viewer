@@ -1993,9 +1993,11 @@ func main() {
 			if len(triage.QuickRef.TopPicks) == 0 {
 				output := struct {
 					GeneratedAt string `json:"generated_at"`
+					DataHash    string `json:"data_hash"`
 					Message     string `json:"message"`
 				}{
 					GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+					DataHash:    dataHash,
 					Message:     "No actionable items available",
 				}
 				encoder := json.NewEncoder(os.Stdout)
@@ -2010,6 +2012,7 @@ func main() {
 			top := triage.QuickRef.TopPicks[0]
 			output := struct {
 				GeneratedAt string   `json:"generated_at"`
+				DataHash    string   `json:"data_hash"`
 				ID          string   `json:"id"`
 				Title       string   `json:"title"`
 				Score       float64  `json:"score"`
@@ -2019,6 +2022,7 @@ func main() {
 				ShowCmd     string   `json:"show_command"`
 			}{
 				GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+				DataHash:    dataHash,
 				ID:          top.ID,
 				Title:       top.Title,
 				Score:       top.Score,
@@ -2051,10 +2055,11 @@ func main() {
 			Feedback:    feedbackInfo,
 			UsageHints: []string{
 				"jq '.triage.quick_ref.top_picks[:3]' - Top 3 picks for immediate work",
-				"jq '.triage.quick_ref.next_up' - Secondary candidates after top picks",
-				"jq '.triage.blockers | map(.id)' - All blocking issue IDs",
-				"jq '.triage.categories.bugs' - Bug-specific triage",
+				"jq '.triage.recommendations[3:10] | map({id,title,score})' - Next candidates after top picks",
+				"jq '.triage.blockers_to_clear | map(.id)' - High-impact blockers to clear",
+				"jq '.triage.recommendations[] | select(.type == \"bug\")' - Bug-focused recommendations",
 				"jq '.triage.quick_ref.top_picks[] | select(.unblocks > 2)' - High-impact picks",
+				"jq '.triage.quick_wins' - Low-effort, high-impact items",
 				"--robot-next - Get only the single top recommendation",
 				"--robot-triage-by-track - Group by execution track for multi-agent coordination",
 				"--robot-triage-by-label - Group by label for area-focused agents",
@@ -3050,29 +3055,6 @@ func countEdges(issues []model.Issue) int {
 		}
 	}
 	return count
-}
-
-// parseTimeRef parses common date/time formats used for history flags.
-func parseTimeRef(s string) (time.Time, error) {
-	layouts := []string{
-		time.RFC3339,
-		"2006-01-02",
-		"2006-01-02 15:04",
-		"2006-01-02 15:04:05",
-	}
-	for _, layout := range layouts {
-		switch layout {
-		case time.RFC3339:
-			if t, err := time.Parse(layout, s); err == nil {
-				return t, nil
-			}
-		default:
-			if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
-				return t, nil
-			}
-		}
-	}
-	return time.Time{}, fmt.Errorf("unable to parse time reference %q", s)
 }
 
 // printDiffSummary prints a human-readable diff summary
