@@ -9,7 +9,7 @@ import (
 	"github.com/Dicklesworthstone/beads_viewer/pkg/loader"
 )
 
-func TestParseIssuesWithOptions_TokenTooLong(t *testing.T) {
+func TestParseIssuesWithOptions_LineTooLong(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "large_line.jsonl")
 

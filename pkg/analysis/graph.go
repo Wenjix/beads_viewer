@@ -721,9 +721,11 @@ func (a *Analyzer) computePhase2WithProfile(ctx context.Context, stats *GraphSta
 			}
 		case <-timer.C:
 			profile.PageRankTO = true
-			uniform := 1.0 / float64(len(a.issueMap))
-			for id := range a.issueMap {
-				localPageRank[id] = uniform
+			if len(a.issueMap) > 0 {
+				uniform := 1.0 / float64(len(a.issueMap))
+				for id := range a.issueMap {
+					localPageRank[id] = uniform
+				}
 			}
 		case <-ctx.Done():
 			timer.Stop()
@@ -1349,7 +1351,10 @@ func (a *Analyzer) GetOpenBlockers(issueID string) []string {
 	return openBlockers
 }
 
-// computeEigenvector runs a simple power-iteration to estimate eigenvector centrality.
+// computePageRank returns PageRank weights for nodes of g.
+//
+// It uses a deterministic power iteration with damping factor damp and terminates
+// when the L2 norm of the delta is below tol (or after a hard iteration cap).
 func computePageRank(g graph.Directed, damp, tol float64) map[int64]float64 {
 	nodes := graph.NodesOf(g.Nodes())
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID() < nodes[j].ID() })
@@ -1436,6 +1441,7 @@ func computePageRank(g graph.Directed, damp, tol float64) map[int64]float64 {
 	return ranks
 }
 
+// computeEigenvector runs a simple power-iteration to estimate eigenvector centrality.
 func computeEigenvector(g graph.Directed) map[int64]float64 {
 	nodes := g.Nodes()
 	var nodeList []graph.Node

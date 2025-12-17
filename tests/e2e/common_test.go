@@ -10,6 +10,7 @@ import (
 )
 
 var bvBinaryPath string
+var bvBinaryDir string
 
 func TestMain(m *testing.M) {
 	// Build the binary once for all tests
@@ -18,8 +19,11 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	// Run tests
-	os.Exit(m.Run())
+	code := m.Run()
+	if bvBinaryDir != "" {
+		_ = os.RemoveAll(bvBinaryDir)
+	}
+	os.Exit(code)
 }
 
 func buildBvOnce() error {
@@ -27,8 +31,7 @@ func buildBvOnce() error {
 	if err != nil {
 		return err
 	}
-	// We don't remove tempDir here; it persists for the duration of the test suite run.
-	// OS usually cleans up /tmp, or we could register a cleanup if TestMain supported it easier.
+	bvBinaryDir = tempDir
 
 	binName := "bv"
 	if runtime.GOOS == "windows" {

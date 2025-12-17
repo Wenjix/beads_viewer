@@ -153,7 +153,8 @@ type ParseOptions struct {
 	// If nil, warnings are printed to os.Stderr.
 	WarningHandler func(string)
 
-	// BufferSize sets the maximum token size for the scanner.
+	// BufferSize sets the maximum line size (in bytes) to read at once.
+	// Lines longer than this are skipped with a warning.
 	// If 0, uses DefaultMaxBufferSize (10MB).
 	BufferSize int
 }
