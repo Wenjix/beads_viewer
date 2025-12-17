@@ -253,6 +253,18 @@ func (g *GraphModel) SelectedIssue() *model.Issue {
 	return g.issueMap[id]
 }
 
+// SelectByID selects an issue by its ID (bv-xf4p)
+func (g *GraphModel) SelectByID(id string) bool {
+	for i, sortedID := range g.sortedIDs {
+		if sortedID == id {
+			g.selectedIdx = i
+			g.ensureVisible()
+			return true
+		}
+	}
+	return false
+}
+
 func (g *GraphModel) TotalCount() int {
 	return len(g.sortedIDs)
 }

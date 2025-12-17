@@ -2352,12 +2352,129 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) Model {
 		// Toggle author filter (simple toggle for now)
 		m.statusMsg = "💡 Author filter: Use 'c' to cycle confidence thresholds"
 		m.statusIsError = false
+	case "o":
+		// Open commit in browser (bv-xf4p)
+		var sha string
+		if m.historyView.IsGitMode() {
+			if commit := m.historyView.SelectedGitCommit(); commit != nil {
+				sha = commit.SHA
+			}
+		} else {
+			if commit := m.historyView.SelectedCommit(); commit != nil {
+				sha = commit.SHA
+			}
+		}
+		if sha != "" {
+			url := m.getCommitURL(sha)
+			if url != "" {
+				if err := openBrowserURL(url); err != nil {
+					m.statusMsg = fmt.Sprintf("❌ Could not open browser: %v", err)
+					m.statusIsError = true
+				} else {
+					m.statusMsg = fmt.Sprintf("🌐 Opened %s in browser", sha[:7])
+					m.statusIsError = false
+				}
+			} else {
+				m.statusMsg = "❌ No git remote configured"
+				m.statusIsError = true
+			}
+		} else {
+			m.statusMsg = "❌ No commit selected"
+			m.statusIsError = true
+		}
+	case "g":
+		// Jump to graph view for selected bead (bv-xf4p)
+		var selectedID string
+		if m.historyView.IsGitMode() {
+			selectedID = m.historyView.SelectedRelatedBeadID()
+		} else {
+			selectedID = m.historyView.SelectedBeadID()
+		}
+		if selectedID != "" {
+			// Find and select the bead in the main list
+			for i, item := range m.list.Items() {
+				if issueItem, ok := item.(IssueItem); ok && issueItem.Issue.ID == selectedID {
+					m.list.Select(i)
+					break
+				}
+			}
+			// Switch to graph view focused on this bead
+			m.isHistoryView = false
+			m.graphView.SelectByID(selectedID)
+			m.focused = focusGraph
+			m.statusMsg = fmt.Sprintf("📊 Graph view: %s", selectedID)
+			m.statusIsError = false
+		} else {
+			m.statusMsg = "❌ No bead selected"
+			m.statusIsError = true
+		}
 	case "h", "esc":
 		// Exit history view
 		m.isHistoryView = false
 		m.focused = focusList
 	}
 	return m
+}
+
+// getCommitURL returns the GitHub/GitLab commit URL for a SHA (bv-xf4p)
+func (m Model) getCommitURL(sha string) string {
+	// Get git remote URL
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = m.workDir
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	remoteURL := strings.TrimSpace(string(output))
+	if remoteURL == "" {
+		return ""
+	}
+
+	// Convert to web URL
+	webURL := gitRemoteToWebURL(remoteURL)
+	if webURL == "" {
+		return ""
+	}
+
+	return webURL + "/commit/" + sha
+}
+
+// gitRemoteToWebURL converts a git remote URL to a web URL (bv-xf4p)
+func gitRemoteToWebURL(remote string) string {
+	// Handle SSH URLs: git@github.com:user/repo.git
+	if strings.HasPrefix(remote, "git@") {
+		// Remove git@ prefix and .git suffix
+		remote = strings.TrimPrefix(remote, "git@")
+		remote = strings.TrimSuffix(remote, ".git")
+		// Replace : with /
+		remote = strings.Replace(remote, ":", "/", 1)
+		return "https://" + remote
+	}
+
+	// Handle HTTPS URLs: https://github.com/user/repo.git
+	if strings.HasPrefix(remote, "https://") || strings.HasPrefix(remote, "http://") {
+		remote = strings.TrimSuffix(remote, ".git")
+		return remote
+	}
+
+	return ""
+}
+
+// openBrowserURL opens a URL in the default browser (bv-xf4p)
+func openBrowserURL(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
+	return cmd.Start()
 }
 
 // handleFlowMatrixKeys handles keyboard input when flow matrix view is focused

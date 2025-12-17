@@ -146,6 +146,8 @@ func (s *ShortcutsSidebar) allSections() []shortcutSection {
 				{"J/K", "Detail ↓/↑"},
 				{"Tab", "Focus toggle"},
 				{"y", "Copy SHA"},
+				{"o", "Open in browser"},
+				{"g", "Graph view"},
 				{"c", "Cycle filter"},
 			},
 		},

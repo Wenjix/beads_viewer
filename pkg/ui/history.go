@@ -1492,9 +1492,9 @@ func (h *HistoryModel) renderDetailPanel(width, height int) string {
 	statsLine := statsStyle.Render(strings.Join(statsItems, " • "))
 	lines = append(lines, statsLine)
 
-	// Navigation hint
+	// Navigation hint (bv-xf4p: added o and g keys)
 	hintStyle := t.Renderer.NewStyle().Foreground(t.Muted).Italic(true)
-	lines = append(lines, hintStyle.Render("J/K:commits  y:copy SHA"))
+	lines = append(lines, hintStyle.Render("J/K:nav  y:copy  o:open  g:graph"))
 
 	content := strings.Join(lines, "\n")
 	return panelStyle.Render(content)
@@ -2297,15 +2297,24 @@ func (h *HistoryModel) renderGitDetailPanel(width, height int) string {
 		lines = append(lines, msgStyle.Render(ml))
 	}
 
+	// Reserve space for footer hint (bv-xf4p)
+	footerHeight := 2
+	contentHeight := height - 2 - footerHeight
+
 	// Pad with empty lines
-	for len(lines) < height-2 {
+	for len(lines) < contentHeight {
 		lines = append(lines, "")
 	}
 
 	// Truncate if too many lines
-	if len(lines) > height-2 {
-		lines = lines[:height-2]
+	if len(lines) > contentHeight {
+		lines = lines[:contentHeight]
 	}
+
+	// Add footer hint (bv-xf4p)
+	lines = append(lines, strings.Repeat("─", detailSepWidth))
+	hintStyle := t.Renderer.NewStyle().Foreground(t.Muted).Italic(true)
+	lines = append(lines, hintStyle.Render("J/K:bead  y:copy  o:open  g:graph"))
 
 	content := strings.Join(lines, "\n")
 	return panelStyle.Render(content)
