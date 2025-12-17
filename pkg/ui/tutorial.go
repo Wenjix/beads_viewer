@@ -29,21 +29,31 @@ type TutorialModel struct {
 	theme        Theme
 	contextMode  bool   // If true, filter pages by current context
 	context      string // Current view context (e.g., "list", "board", "graph")
+
+	// Markdown rendering with Glamour (bv-lb0h)
+	markdownRenderer *MarkdownRenderer
 }
 
 // NewTutorialModel creates a new tutorial model with default pages.
 func NewTutorialModel(theme Theme) TutorialModel {
+	// Calculate initial content width for markdown renderer
+	contentWidth := 80 - 6 // default width minus padding
+	if contentWidth < 40 {
+		contentWidth = 40
+	}
+
 	return TutorialModel{
-		pages:        defaultTutorialPages(),
-		currentPage:  0,
-		scrollOffset: 0,
-		tocVisible:   false,
-		progress:     make(map[string]bool),
-		width:        80,
-		height:       24,
-		theme:        theme,
-		contextMode:  false,
-		context:      "",
+		pages:            defaultTutorialPages(),
+		currentPage:      0,
+		scrollOffset:     0,
+		tocVisible:       false,
+		progress:         make(map[string]bool),
+		width:            80,
+		height:           24,
+		theme:            theme,
+		contextMode:      false,
+		context:          "",
+		markdownRenderer: NewMarkdownRendererWithTheme(contentWidth, theme),
 	}
 }
 
@@ -213,12 +223,26 @@ func (m TutorialModel) renderHeader(page TutorialPage, totalPages int) string {
 	return headerContent
 }
 
-// renderContent renders the page content with scroll handling.
+// renderContent renders the page content with Glamour markdown and scroll handling.
 func (m TutorialModel) renderContent(page TutorialPage, width int) string {
 	r := m.theme.Renderer
 
-	// Split content into lines
-	lines := strings.Split(page.Content, "\n")
+	// Render markdown content using Glamour
+	var renderedContent string
+	if m.markdownRenderer != nil {
+		rendered, err := m.markdownRenderer.Render(page.Content)
+		if err == nil {
+			renderedContent = strings.TrimSpace(rendered)
+		} else {
+			// Fallback to raw content on error
+			renderedContent = page.Content
+		}
+	} else {
+		renderedContent = page.Content
+	}
+
+	// Split rendered content into lines for scrolling
+	lines := strings.Split(renderedContent, "\n")
 
 	// Calculate visible lines based on height
 	visibleHeight := m.height - 10 // header, footer, padding
@@ -242,19 +266,17 @@ func (m TutorialModel) renderContent(page TutorialPage, width int) string {
 	}
 	visibleLines := lines[m.scrollOffset:endLine]
 
-	// Style the content
-	contentStyle := r.NewStyle().
-		Width(width).
-		Foreground(lipgloss.AdaptiveColor{Light: "#333333", Dark: "#F8F8F2"})
+	// Join visible lines (already styled by Glamour)
+	content := strings.Join(visibleLines, "\n")
 
-	// Add scroll indicator if needed
-	content := contentStyle.Render(strings.Join(visibleLines, "\n"))
-
+	// Add scroll indicators
 	if m.scrollOffset > 0 {
-		content = r.NewStyle().Foreground(m.theme.Muted).Render("↑ scroll up") + "\n" + content
+		scrollUpHint := r.NewStyle().Foreground(m.theme.Muted).Render("↑ more above")
+		content = scrollUpHint + "\n" + content
 	}
 	if endLine < len(lines) {
-		content = content + "\n" + r.NewStyle().Foreground(m.theme.Muted).Render("↓ scroll down")
+		scrollDownHint := r.NewStyle().Foreground(m.theme.Muted).Render("↓ more below")
+		content = content + "\n" + scrollDownHint
 	}
 
 	return content
@@ -424,10 +446,23 @@ func (m *TutorialModel) SetContextMode(enabled bool) {
 	}
 }
 
-// SetSize sets the tutorial dimensions.
+// SetSize sets the tutorial dimensions and updates the markdown renderer.
 func (m *TutorialModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
+
+	// Update markdown renderer width to match content area
+	contentWidth := width - 6 // padding and borders
+	if m.tocVisible {
+		contentWidth -= 24 // TOC sidebar width
+	}
+	if contentWidth < 40 {
+		contentWidth = 40
+	}
+
+	if m.markdownRenderer != nil {
+		m.markdownRenderer.SetWidthWithTheme(contentWidth, m.theme)
+	}
 }
 
 // MarkViewed marks a page as viewed.
@@ -527,161 +562,192 @@ func defaultTutorialPages() []TutorialPage {
 			ID:      "intro",
 			Title:   "Welcome to bv",
 			Section: "Getting Started",
-			Content: `Welcome to beads_viewer (bv)!
+			Content: `Welcome to **beads_viewer** (bv)!
 
-bv is a powerful TUI (Terminal User Interface) for managing your
-project's issues using the Beads format.
+bv is a powerful *TUI* (Terminal User Interface) for managing your project's issues using the **Beads** format.
 
 This tutorial will guide you through:
-• Navigating the interface
-• Understanding views
-• Working with beads (issues)
-• Advanced features
 
-Press → or 'n' to continue to the next page.`,
+- Navigating the interface
+- Understanding views
+- Working with beads (issues)
+- Advanced features
+
+> Press **→** or **n** to continue to the next page.`,
 		},
 		{
 			ID:      "navigation",
 			Title:   "Basic Navigation",
 			Section: "Getting Started",
-			Content: `Navigation Basics
+			Content: `## Navigation Basics
 
 Use these keys to navigate:
-  j/k or ↓/↑  - Move up/down in lists
-  Enter       - Select/open item
-  Esc         - Go back/close overlay
-  q           - Quit bv
-  ?           - Show help overlay
 
-Views:
-  1 - List view (default)
-  2 - Board view (Kanban)
-  3 - Graph view (dependencies)
-  4 - Labels view
-  5 - History view
+| Key | Action |
+|-----|--------|
+| **j/k** or **↓/↑** | Move up/down in lists |
+| **Enter** | Select/open item |
+| **Esc** | Go back/close overlay |
+| **q** | Quit bv |
+| **?** | Show help overlay |
 
-Press → to continue.`,
+### Views
+
+| Key | View |
+|-----|------|
+| **1** | List view (default) |
+| **2** | Board view (Kanban) |
+| **3** | Graph view (dependencies) |
+| **4** | Labels view |
+| **5** | History view |
+
+> Press **→** to continue.`,
 		},
 		{
 			ID:       "list-view",
 			Title:    "List View",
 			Section:  "Views",
 			Contexts: []string{"list"},
-			Content: `List View
+			Content: `## List View
 
-The List view shows all your beads in a filterable list.
+The **List view** shows all your beads in a filterable list.
 
-Filtering:
-  o - Show only open issues
-  c - Show only closed issues
-  r - Show only ready issues (no blockers)
-  a - Show all issues
+### Filtering
 
-Sorting:
-  s - Cycle sort mode (priority, created, updated)
-  S - Reverse sort order
+| Key | Filter |
+|-----|--------|
+| **o** | Open issues only |
+| **c** | Closed issues only |
+| **r** | Ready issues (no blockers) |
+| **a** | All issues |
 
-Search:
-  / - Start searching
-  n/N - Next/previous match`,
+### Sorting
+
+- **s** - Cycle sort mode (priority, created, updated)
+- **S** - Reverse sort order
+
+### Search
+
+Press **/** to start searching, then **n/N** for next/previous match.`,
 		},
 		{
 			ID:       "board-view",
 			Title:    "Board View",
 			Section:  "Views",
 			Contexts: []string{"board"},
-			Content: `Board View
+			Content: `## Board View
 
-The Board view shows a Kanban-style board with columns
-for each status: Open, In Progress, Blocked, Closed.
+The **Board view** shows a Kanban-style board with columns for each status:
 
-Navigation:
-  h/l or ←/→ - Move between columns
-  j/k or ↓/↑ - Move within column
+1. **Open** - New issues
+2. **In Progress** - Being worked on
+3. **Blocked** - Waiting on dependencies
+4. **Closed** - Completed
 
-Actions:
-  Enter - View issue details
-  m     - Move issue to different status`,
+### Navigation
+
+| Key | Action |
+|-----|--------|
+| **h/l** or **←/→** | Move between columns |
+| **j/k** or **↓/↑** | Move within column |
+| **Enter** | View issue details |
+| **m** | Move issue to different status |`,
 		},
 		{
 			ID:       "graph-view",
 			Title:    "Graph View",
 			Section:  "Views",
 			Contexts: []string{"graph"},
-			Content: `Graph View
+			Content: `## Graph View
 
-The Graph view visualizes dependencies between beads.
+The **Graph view** visualizes dependencies between beads.
 
-Reading the graph:
-  → Arrow points TO the dependency
-  Highlighted node is currently selected
+### Reading the Graph
 
-Navigation:
-  j/k - Move between nodes
-  Enter - Select node
-  f - Focus on selected node's subgraph`,
+- Arrow **→** points TO the dependency
+- *Highlighted* node is currently selected
+
+### Navigation
+
+| Key | Action |
+|-----|--------|
+| **j/k** | Move between nodes |
+| **Enter** | Select node |
+| **f** | Focus on selected node's subgraph |`,
 		},
 		{
 			ID:      "working-with-beads",
 			Title:   "Working with Beads",
 			Section: "Core Concepts",
-			Content: `Working with Beads
+			Content: `## Working with Beads
 
 Each bead (issue) has:
-  • ID - Unique identifier (e.g., bv-abc123)
-  • Title - Short description
-  • Status - open, in_progress, blocked, closed
-  • Priority - P0 (critical) to P4 (backlog)
-  • Type - bug, feature, task, epic, chore
-  • Dependencies - What it blocks/is blocked by
 
-Creating beads:
-  Use 'bd create' from the command line
+- **ID** - Unique identifier (e.g., ` + "`bv-abc123`" + `)
+- **Title** - Short description
+- **Status** - open, in_progress, blocked, closed
+- **Priority** - P0 (critical) to P4 (backlog)
+- **Type** - bug, feature, task, epic, chore
+- **Dependencies** - What it blocks/is blocked by
 
-Updating beads:
-  Use 'bd update <id> --status=in_progress'`,
+### Creating Beads
+
+` + "```bash\nbd create --title=\"Fix login bug\" --type=bug --priority=1\n```" + `
+
+### Updating Beads
+
+` + "```bash\nbd update bv-abc123 --status=in_progress\n```",
 		},
 		{
 			ID:      "ai-integration",
 			Title:   "AI Agent Integration",
 			Section: "Advanced",
-			Content: `AI Agent Integration
+			Content: `## AI Agent Integration
 
-bv integrates seamlessly with AI coding agents.
+bv integrates seamlessly with **AI coding agents**.
 
-Robot Mode:
-  bv --robot-triage   Get prioritized work recommendations
-  bv --robot-next     Get single top priority item
-  bv --robot-plan     Get parallel execution tracks
+### Robot Mode
 
-The AGENTS.md file in your project helps AI agents
-understand your workflow and use bv effectively.
+` + "```bash\nbv --robot-triage   # Prioritized work recommendations\nbv --robot-next     # Single top priority item\nbv --robot-plan     # Parallel execution tracks\n```" + `
 
-See AGENTS.md for the complete AI integration guide.`,
+### AGENTS.md
+
+The ` + "`AGENTS.md`" + ` file in your project helps AI agents understand your workflow and use bv effectively.
+
+> See *AGENTS.md* for the complete AI integration guide.`,
 		},
 		{
 			ID:      "keyboard-reference",
 			Title:   "Keyboard Reference",
 			Section: "Reference",
-			Content: `Quick Keyboard Reference
+			Content: `## Quick Keyboard Reference
 
-Global:
-  ? or F1 - Help overlay
-  q       - Quit
-  Esc     - Close overlay / go back
-  1-5     - Switch views
+### Global
 
-Navigation:
-  j/k     - Move down/up
-  h/l     - Move left/right
-  g/G     - Go to top/bottom
-  Enter   - Select
+| Key | Action |
+|-----|--------|
+| **?** or **F1** | Help overlay |
+| **q** | Quit |
+| **Esc** | Close overlay / go back |
+| **1-5** | Switch views |
 
-Filtering:
-  /       - Search
-  o/c/r/a - Filter by status
+### Navigation
 
-For complete reference, press ? in any view.`,
+| Key | Action |
+|-----|--------|
+| **j/k** | Move down/up |
+| **h/l** | Move left/right |
+| **g/G** | Go to top/bottom |
+| **Enter** | Select |
+
+### Filtering
+
+| Key | Action |
+|-----|--------|
+| **/** | Search |
+| **o/c/r/a** | Filter by status |
+
+> For complete reference, press **?** in any view.`,
 		},
 	}
 }

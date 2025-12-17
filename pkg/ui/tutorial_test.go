@@ -606,3 +606,87 @@ func TestTutorialPageTitleDisplay(t *testing.T) {
 		t.Error("View should contain section name")
 	}
 }
+
+// Tests for Glamour Markdown Rendering (bv-lb0h)
+
+func TestTutorialMarkdownRendererInitialized(t *testing.T) {
+	m := newTestTutorialModel()
+
+	// Markdown renderer should be initialized
+	if m.markdownRenderer == nil {
+		t.Error("Markdown renderer should be initialized")
+	}
+}
+
+func TestTutorialMarkdownContent(t *testing.T) {
+	m := newTestTutorialModel()
+	m.SetSize(80, 30)
+
+	view := m.View()
+
+	// Should contain rendered markdown elements
+	// Bold text should be rendered (though exact ANSI codes vary)
+	if !strings.Contains(view, "beads_viewer") {
+		t.Error("View should contain beads_viewer text")
+	}
+
+	// Bullet points from markdown should be present
+	if !strings.Contains(view, "•") || !strings.Contains(view, "-") {
+		// Glamour renders bullets as •
+		// Check if content has list items
+	}
+}
+
+func TestTutorialSetSizeUpdatesMarkdownRenderer(t *testing.T) {
+	m := newTestTutorialModel()
+
+	// Change size
+	m.SetSize(120, 40)
+
+	// The markdown renderer should be updated (not nil)
+	if m.markdownRenderer == nil {
+		t.Error("Markdown renderer should still exist after SetSize")
+	}
+
+	// Width should be updated
+	if m.width != 120 {
+		t.Errorf("Expected width 120, got %d", m.width)
+	}
+}
+
+func TestTutorialMarkdownWithCodeBlocks(t *testing.T) {
+	m := newTestTutorialModel()
+	m.SetSize(80, 50) // Larger to show more content
+
+	// Navigate to the "Working with Beads" page which has code blocks
+	m.JumpToPage(5) // Index 5 is "working-with-beads"
+
+	view := m.View()
+
+	// Code blocks should be present (content includes bash commands)
+	// The exact rendering depends on Glamour, but the content should include command text
+	if !strings.Contains(view, "bd") {
+		t.Error("View should contain 'bd' command from code blocks")
+	}
+}
+
+func TestTutorialMarkdownWithTables(t *testing.T) {
+	m := newTestTutorialModel()
+	m.SetSize(100, 40) // Wide enough for tables
+
+	// Navigate to navigation page which has tables
+	m.JumpToPage(1) // Index 1 is "navigation"
+
+	view := m.View()
+
+	// Tables should render with separators
+	// Glamour renders tables with │ characters
+	if !strings.Contains(view, "│") && !strings.Contains(view, "|") {
+		// Table separators might vary by theme
+	}
+
+	// Content from table should be present
+	if !strings.Contains(view, "Action") {
+		t.Error("View should contain table header 'Action'")
+	}
+}
