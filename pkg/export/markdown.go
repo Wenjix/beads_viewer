@@ -817,15 +817,17 @@ func barChart(value float64) string {
 	}
 }
 
-// truncateString truncates a string to maxLen with ellipsis
+// truncateString truncates a string to maxLen runes with ellipsis.
+// Uses rune-based counting to safely handle UTF-8 multi-byte characters.
 func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
 	if maxLen < 3 {
-		return s[:maxLen]
+		return string(runes[:maxLen])
 	}
-	return s[:maxLen-1] + "…"
+	return string(runes[:maxLen-1]) + "…"
 }
 
 // getTypeIcon returns a compact icon for issue type (for tables)

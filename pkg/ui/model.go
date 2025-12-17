@@ -4054,12 +4054,14 @@ func getEventIcon(eventType correlation.EventType) string {
 	}
 }
 
-// truncateString truncates a string to maxLen with ellipsis
+// truncateString truncates a string to maxLen runes with ellipsis.
+// Uses rune-based counting to safely handle UTF-8 multi-byte characters.
 func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen-1] + "…"
+	return string(runes[:maxLen-1]) + "…"
 }
 
 // GetTypeIconMD returns the emoji icon for an issue type (for markdown)

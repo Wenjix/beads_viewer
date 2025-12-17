@@ -250,15 +250,17 @@ func (m Model) renderSprintDashboard() string {
 	)
 }
 
-// truncateStrSprint truncates a string to maxLen characters, adding ellipsis if needed
+// truncateStrSprint truncates a string to maxLen runes, adding ellipsis if needed.
+// Uses rune-based counting to safely handle UTF-8 multi-byte characters.
 func truncateStrSprint(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
 	if maxLen <= 3 {
-		return s[:maxLen]
+		return string(runes[:maxLen])
 	}
-	return s[:maxLen-1] + "…"
+	return string(runes[:maxLen-1]) + "…"
 }
 
 // handleSprintKeys handles keyboard input when in sprint view (bv-161)
