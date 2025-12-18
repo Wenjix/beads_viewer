@@ -45,6 +45,12 @@ type BoardModel struct {
 
 	// Vim key combo tracking (bv-yg39)
 	waitingForG bool // True if we're waiting for second 'g' in 'gg' combo
+
+	// Empty column visibility override (bv-tf6j)
+	// nil = auto (status shows all, priority/type hide empty)
+	// true = always show all columns
+	// false = always hide empty columns
+	showEmptyColumns *bool
 }
 
 // searchMatch holds info about a matching card (bv-yg39)
@@ -145,15 +151,21 @@ func sortIssuesByPriorityAndDate(issues []model.Issue) {
 	})
 }
 
-// updateActiveColumns rebuilds the list of non-empty column indices
+// updateActiveColumns rebuilds the list of non-empty column indices (bv-tf6j)
+// Behavior depends on swimlane mode unless explicitly overridden:
+// - Status mode: shows all 4 columns (even empty) for workflow visibility
+// - Priority/Type modes: hides empty columns to save space
 func (b *BoardModel) updateActiveColumns() {
+	// Determine whether to show empty columns
+	showEmpty := b.shouldShowEmptyColumns()
+
 	b.activeColIdx = nil
 	for i := 0; i < 4; i++ {
-		if len(b.columns[i]) > 0 {
+		if len(b.columns[i]) > 0 || showEmpty {
 			b.activeColIdx = append(b.activeColIdx, i)
 		}
 	}
-	// If all columns are empty, include all columns anyway
+	// If all columns are empty (and we're hiding empty), include all columns anyway
 	if len(b.activeColIdx) == 0 {
 		b.activeColIdx = []int{ColOpen, ColInProgress, ColBlocked, ColClosed}
 	}
@@ -164,6 +176,63 @@ func (b *BoardModel) updateActiveColumns() {
 	if b.focusedCol < 0 {
 		b.focusedCol = 0
 	}
+}
+
+// shouldShowEmptyColumns returns whether empty columns should be visible (bv-tf6j)
+func (b *BoardModel) shouldShowEmptyColumns() bool {
+	// Explicit override takes precedence
+	if b.showEmptyColumns != nil {
+		return *b.showEmptyColumns
+	}
+	// Auto behavior: Status mode shows all, others hide empty
+	return b.swimLaneMode == SwimByStatus
+}
+
+// ToggleEmptyColumns cycles through empty column visibility modes (bv-tf6j)
+// nil (auto) -> true (show all) -> false (hide empty) -> nil (auto)
+func (b *BoardModel) ToggleEmptyColumns() {
+	if b.showEmptyColumns == nil {
+		showAll := true
+		b.showEmptyColumns = &showAll
+	} else if *b.showEmptyColumns {
+		hideEmpty := false
+		b.showEmptyColumns = &hideEmpty
+	} else {
+		b.showEmptyColumns = nil // Back to auto
+	}
+	b.updateActiveColumns()
+}
+
+// GetEmptyColumnVisibilityMode returns the current visibility mode name (bv-tf6j)
+func (b *BoardModel) GetEmptyColumnVisibilityMode() string {
+	if b.showEmptyColumns == nil {
+		return "Auto"
+	}
+	if *b.showEmptyColumns {
+		return "Show All"
+	}
+	return "Hide Empty"
+}
+
+// HiddenColumnCount returns the number of empty columns currently hidden (bv-tf6j)
+func (b *BoardModel) HiddenColumnCount() int {
+	hidden := 0
+	for i := 0; i < 4; i++ {
+		if len(b.columns[i]) == 0 {
+			// Check if this column is in activeColIdx
+			found := false
+			for _, idx := range b.activeColIdx {
+				if idx == i {
+					found = true
+					break
+				}
+			}
+			if !found {
+				hidden++
+			}
+		}
+	}
+	return hidden
 }
 
 // buildBlocksIndex creates a reverse dependency map: for each issue that is depended on,
@@ -739,7 +808,7 @@ func (b BoardModel) View(width, height int) string {
 	}
 	// NO maxColWidth cap - use all available horizontal space
 
-	colHeight := height - 4 // Account for header
+	colHeight := height - 6 // Account for column header + title bar (bv-tf6j)
 	if colHeight < 8 {
 		colHeight = 8
 	}
@@ -928,7 +997,13 @@ func (b BoardModel) View(width, height int) string {
 	}
 
 	// Join columns with gaps
-	boardView := lipgloss.JoinHorizontal(lipgloss.Top, renderedCols...)
+	columnsView := lipgloss.JoinHorizontal(lipgloss.Top, renderedCols...)
+
+	// Build title bar with swimlane mode and hidden column indicator (bv-tf6j)
+	titleBar := b.renderTitleBar(boardWidth, t)
+
+	// Combine title bar and columns
+	boardView := lipgloss.JoinVertical(lipgloss.Left, titleBar, columnsView)
 
 	// Add detail panel if shown (bv-r6kh)
 	if detailWidth > 0 {
@@ -937,6 +1012,29 @@ func (b BoardModel) View(width, height int) string {
 	}
 
 	return boardView
+}
+
+// renderTitleBar creates the board title bar with swimlane mode and hidden column count (bv-tf6j)
+func (b BoardModel) renderTitleBar(width int, t Theme) string {
+	// Build title: "BOARD [by: Status]" or "BOARD [by: Priority] [+2 hidden]"
+	modeName := b.GetSwimLaneModeName()
+	title := fmt.Sprintf("BOARD [by: %s]", modeName)
+
+	// Add hidden column indicator if columns are hidden
+	hiddenCount := b.HiddenColumnCount()
+	if hiddenCount > 0 {
+		title = fmt.Sprintf("%s [+%d hidden]", title, hiddenCount)
+	}
+
+	// Style the title bar
+	titleStyle := t.Renderer.NewStyle().
+		Width(width).
+		Align(lipgloss.Center).
+		Foreground(t.Primary).
+		Bold(true).
+		Padding(0, 0, 1, 0) // Bottom padding
+
+	return titleStyle.Render(title)
 }
 
 // getAgeColor returns a color based on issue age (bv-1daf)

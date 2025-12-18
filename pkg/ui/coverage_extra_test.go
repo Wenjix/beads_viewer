@@ -215,6 +215,8 @@ func TestHandleGraphBoardActionableKeys(t *testing.T) {
 	m = m.handleBoardKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 	m = m.handleBoardKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	m = m.handleBoardKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	// Navigate back to Open column (with items) - Status mode shows all columns (bv-tf6j)
+	m.board.JumpToFirstColumn()
 	// Enter should exit board when selection exists
 	m.board.MoveToTop()
 	m = m.handleBoardKeys(tea.KeyMsg{Type: tea.KeyEnter})

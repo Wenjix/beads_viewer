@@ -2247,6 +2247,18 @@ func (m Model) handleBoardKeys(msg tea.KeyMsg) Model {
 		m.statusMsg = fmt.Sprintf("🔀 Swimlane: %s", modeName)
 		m.statusIsError = false
 
+	// Empty column visibility toggle (bv-tf6j)
+	case "e":
+		m.board.ToggleEmptyColumns()
+		visMode := m.board.GetEmptyColumnVisibilityMode()
+		hidden := m.board.HiddenColumnCount()
+		if hidden > 0 {
+			m.statusMsg = fmt.Sprintf("👁 Empty columns: %s (%d hidden)", visMode, hidden)
+		} else {
+			m.statusMsg = fmt.Sprintf("👁 Empty columns: %s", visMode)
+		}
+		m.statusIsError = false
+
 	// Detail panel (bv-r6kh)
 	case "tab":
 		m.board.ToggleDetail()

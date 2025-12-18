@@ -3,6 +3,7 @@ package ui_test
 import (
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,7 +55,9 @@ func TestBoardModelBlackbox(t *testing.T) {
 	}
 }
 
-// TestAdaptiveColumns verifies that only non-empty columns are navigable
+// TestAdaptiveColumns verifies navigation behavior with empty columns
+// In Status mode, all 4 columns are shown (including empty), navigation can enter them
+// In Priority/Type modes, empty columns are hidden and navigation skips them (bv-tf6j)
 func TestAdaptiveColumns(t *testing.T) {
 	theme := createTheme()
 
@@ -67,31 +70,45 @@ func TestAdaptiveColumns(t *testing.T) {
 
 	b := ui.NewBoardModel(issues, theme)
 
-	// Should start on first non-empty column (Open)
+	// Should start on first column (Open) - has items
 	sel := b.SelectedIssue()
 	if sel == nil || sel.ID != "1" {
 		t.Errorf("Expected ID 1 (Open col), got %v", sel)
 	}
 
-	// MoveRight should skip InProgress and Blocked (empty), go to Closed
+	// In Status mode (default), all columns are visible including empty ones
+	// MoveRight goes to InProgress (empty column) - SelectedIssue returns nil
+	b.MoveRight()
+	sel = b.SelectedIssue()
+	if sel != nil {
+		t.Errorf("Expected nil (empty InProgress col) after MoveRight, got %v", sel)
+	}
+
+	// MoveRight again goes to Blocked (also empty)
+	b.MoveRight()
+	sel = b.SelectedIssue()
+	if sel != nil {
+		t.Errorf("Expected nil (empty Blocked col) after second MoveRight, got %v", sel)
+	}
+
+	// MoveRight again goes to Closed (has items)
 	b.MoveRight()
 	sel = b.SelectedIssue()
 	if sel == nil || sel.ID != "3" {
-		t.Errorf("Expected ID 3 (Closed col) after MoveRight, got %v", sel)
+		t.Errorf("Expected ID 3 (Closed col) after third MoveRight, got %v", sel)
 	}
 
-	// MoveRight again should stay on Closed (last non-empty column)
-	b.MoveRight()
-	sel = b.SelectedIssue()
-	if sel == nil || sel.ID != "3" {
-		t.Errorf("Expected to stay on ID 3, got %v", sel)
-	}
+	// Test Priority mode where empty columns ARE hidden
+	b.CycleSwimLaneMode() // Switch to Priority mode
 
-	// MoveLeft should go back to Open (skipping empty columns)
-	b.MoveLeft()
-	sel = b.SelectedIssue()
-	if sel == nil || sel.ID != "1" {
-		t.Errorf("Expected ID 1 (Open col) after MoveLeft, got %v", sel)
+	// In priority mode: P1 in col1, P2 in col1, P1 in col1 (all in P1 column after grouping)
+	// Actually with the test data: ID 1 is P1, ID 2 is P2, ID 3 is P1
+	// So P0 empty, P1 has 2 items (1, 3), P2 has 1 item (2), P3 empty
+	// Hidden columns: P0 (col 0) and P3 (col 3) -> 2 hidden
+
+	hiddenCount := b.HiddenColumnCount()
+	if hiddenCount != 2 {
+		t.Errorf("Priority mode should hide 2 empty columns, got %d", hiddenCount)
 	}
 }
 
@@ -623,12 +640,13 @@ func TestJumpToColumn(t *testing.T) {
 		t.Errorf("Expected ID 2 after JumpToColumn(1), got %v", sel)
 	}
 
-	// Jump to empty column 2 (Blocked) - should find nearest
+	// Jump to empty column 2 (Blocked) - in Status mode (bv-tf6j), empty columns are visible
+	// so JumpToColumn goes directly to the empty column, SelectedIssue returns nil
 	b.JumpToColumn(2)
 	sel = b.SelectedIssue()
-	// Should be on nearest non-empty column (InProgress or Closed)
-	if sel == nil {
-		t.Error("Expected selection after jumping to empty column")
+	// In Status mode, empty columns are navigable, so we land on empty column
+	if sel != nil {
+		t.Error("Expected nil selection after jumping to visible empty column")
 	}
 }
 
@@ -1130,11 +1148,19 @@ func TestSingleColumnOnly(t *testing.T) {
 		}
 	}
 
-	// Navigation should stay in Open
+	// In Status mode (bv-tf6j), all 4 columns are visible
+	// MoveRight moves to InProgress (empty) - SelectedIssue returns nil
 	b.MoveRight()
 	sel := b.SelectedIssue()
+	if sel != nil {
+		t.Error("Should be in empty column after MoveRight (Status mode shows all columns)")
+	}
+
+	// But MoveLeft should go back to Open
+	b.MoveLeft()
+	sel = b.SelectedIssue()
 	if sel == nil || sel.ID != "1" {
-		t.Error("Should stay in Open column when moving right")
+		t.Error("Should be back in Open column after MoveLeft")
 	}
 }
 
@@ -1408,5 +1434,179 @@ func TestColumnStatsAfterSetIssues(t *testing.T) {
 	output2 := b.View(160, 30)
 	if output2 == "" {
 		t.Error("Should render after SetIssues")
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Empty Column Handling Tests (bv-tf6j)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// TestEmptyColumnHandlingStatusMode verifies Status mode always shows all 4 columns
+func TestEmptyColumnHandlingStatusMode(t *testing.T) {
+	theme := createTheme()
+	// Only Open column has items - other columns are empty
+	issues := []model.Issue{
+		{ID: "1", Status: model.StatusOpen, Priority: 1},
+	}
+	b := ui.NewBoardModel(issues, theme)
+
+	// Status mode (default) should show all 4 columns
+	output := b.View(160, 30)
+	if output == "" {
+		t.Error("Should render board")
+	}
+
+	// Verify title bar shows Status mode
+	if !strings.Contains(output, "[by: Status]") {
+		t.Error("Should show Status mode in title bar")
+	}
+
+	// Hidden count should be 0 (all columns shown in Status mode)
+	if b.HiddenColumnCount() != 0 {
+		t.Errorf("Status mode should show all columns, got %d hidden", b.HiddenColumnCount())
+	}
+}
+
+// TestEmptyColumnHandlingPriorityMode verifies Priority mode hides empty columns
+func TestEmptyColumnHandlingPriorityMode(t *testing.T) {
+	theme := createTheme()
+	// Only P1 items - P0, P2, P3 columns will be empty
+	issues := []model.Issue{
+		{ID: "1", Status: model.StatusOpen, Priority: 1},
+		{ID: "2", Status: model.StatusOpen, Priority: 1},
+	}
+	b := ui.NewBoardModel(issues, theme)
+
+	// Switch to Priority mode
+	b.CycleSwimLaneMode()
+
+	// Priority mode should hide empty columns
+	hiddenCount := b.HiddenColumnCount()
+	if hiddenCount != 3 {
+		t.Errorf("Priority mode should hide 3 empty columns, got %d", hiddenCount)
+	}
+
+	// Verify title bar shows hidden count
+	output := b.View(160, 30)
+	if !strings.Contains(output, "[by: Priority]") {
+		t.Error("Should show Priority mode in title bar")
+	}
+	if !strings.Contains(output, "[+3 hidden]") {
+		t.Error("Should show hidden column count in title bar")
+	}
+}
+
+// TestEmptyColumnHandlingTypeMode verifies Type mode hides empty columns
+func TestEmptyColumnHandlingTypeMode(t *testing.T) {
+	theme := createTheme()
+	// Only Bug and Feature - Task and Epic will be empty
+	issues := []model.Issue{
+		{ID: "1", Status: model.StatusOpen, IssueType: model.TypeBug},
+		{ID: "2", Status: model.StatusOpen, IssueType: model.TypeFeature},
+	}
+	b := ui.NewBoardModel(issues, theme)
+
+	// Switch to Type mode (cycle twice: Status -> Priority -> Type)
+	b.CycleSwimLaneMode()
+	b.CycleSwimLaneMode()
+
+	// Type mode should hide 2 empty columns (Task, Epic)
+	hiddenCount := b.HiddenColumnCount()
+	if hiddenCount != 2 {
+		t.Errorf("Type mode should hide 2 empty columns, got %d", hiddenCount)
+	}
+}
+
+// TestEmptyColumnVisibilityToggle verifies 'e' key toggles visibility
+func TestEmptyColumnVisibilityToggle(t *testing.T) {
+	theme := createTheme()
+	issues := []model.Issue{
+		{ID: "1", Status: model.StatusOpen, Priority: 1},
+	}
+	b := ui.NewBoardModel(issues, theme)
+
+	// Switch to Priority mode (where auto hides empty)
+	b.CycleSwimLaneMode()
+
+	// Initially Auto mode
+	if b.GetEmptyColumnVisibilityMode() != "Auto" {
+		t.Errorf("Initial mode should be Auto, got %s", b.GetEmptyColumnVisibilityMode())
+	}
+	initialHidden := b.HiddenColumnCount()
+
+	// Toggle to "Show All"
+	b.ToggleEmptyColumns()
+	if b.GetEmptyColumnVisibilityMode() != "Show All" {
+		t.Errorf("After first toggle should be Show All, got %s", b.GetEmptyColumnVisibilityMode())
+	}
+	if b.HiddenColumnCount() != 0 {
+		t.Error("Show All should have 0 hidden columns")
+	}
+
+	// Toggle to "Hide Empty"
+	b.ToggleEmptyColumns()
+	if b.GetEmptyColumnVisibilityMode() != "Hide Empty" {
+		t.Errorf("After second toggle should be Hide Empty, got %s", b.GetEmptyColumnVisibilityMode())
+	}
+
+	// Toggle back to "Auto"
+	b.ToggleEmptyColumns()
+	if b.GetEmptyColumnVisibilityMode() != "Auto" {
+		t.Errorf("After third toggle should be Auto, got %s", b.GetEmptyColumnVisibilityMode())
+	}
+	if b.HiddenColumnCount() != initialHidden {
+		t.Error("Auto should restore initial hidden count")
+	}
+}
+
+// TestEmptyColumnNavigationSkipsHidden verifies navigation skips hidden columns
+func TestEmptyColumnNavigationSkipsHidden(t *testing.T) {
+	theme := createTheme()
+	// P0 in col 0, P2 in col 2 - P1 and P3 columns empty
+	issues := []model.Issue{
+		{ID: "1", Status: model.StatusOpen, Priority: 0}, // P0 -> col 0
+		{ID: "2", Status: model.StatusOpen, Priority: 2}, // P2 -> col 2
+	}
+	b := ui.NewBoardModel(issues, theme)
+
+	// Switch to Priority mode
+	b.CycleSwimLaneMode()
+
+	// Should start in first visible column (P0)
+	sel1 := b.SelectedIssue()
+	if sel1 == nil || sel1.Priority != 0 {
+		t.Error("Should start in P0 column")
+	}
+
+	// MoveRight should jump to P2 (skipping empty P1)
+	b.MoveRight()
+	sel2 := b.SelectedIssue()
+	if sel2 == nil || sel2.Priority != 2 {
+		t.Error("MoveRight should jump to P2, skipping empty P1")
+	}
+
+	// MoveRight again should stay (no more columns)
+	b.MoveRight()
+	sel3 := b.SelectedIssue()
+	if sel3 == nil || sel3.Priority != 2 {
+		t.Error("Should stay in P2 column")
+	}
+}
+
+// TestEmptyColumnTitleBarRendering verifies the title bar is rendered correctly
+func TestEmptyColumnTitleBarRendering(t *testing.T) {
+	theme := createTheme()
+	issues := []model.Issue{
+		{ID: "1", Status: model.StatusOpen},
+	}
+	b := ui.NewBoardModel(issues, theme)
+
+	// Status mode - should show "BOARD [by: Status]"
+	output := b.View(160, 30)
+	if !strings.Contains(output, "BOARD") {
+		t.Error("Title bar should contain 'BOARD'")
+	}
+	if !strings.Contains(output, "[by: Status]") {
+		t.Error("Title bar should show swimlane mode")
 	}
 }
