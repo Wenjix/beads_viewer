@@ -1,6 +1,7 @@
 package main_test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestExportPages_IncludesHistoryAndRunsHooks(t *testing.T) {
@@ -705,4 +708,433 @@ func createRepoWithDeps(t *testing.T) string {
 // itoa is a simple int to string helper
 func itoa(i int) string {
 	return fmt.Sprintf("%d", i)
+}
+
+// ============================================================================
+// bv-qnlb: E2E Tests for Pages Export Options
+// Tests for --pages-include-closed and --pages-include-history flags
+// ============================================================================
+
+// TestExportPages_ExcludeClosed_SQLiteVerification verifies closed issues
+// are NOT in the SQLite database when --pages-include-closed=false.
+func TestExportPages_ExcludeClosed_SQLiteVerification(t *testing.T) {
+	bv := buildBvBinary(t)
+	stageViewerAssets(t, bv)
+
+	repoDir := t.TempDir()
+	beadsPath := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsPath, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	// Create mix of open and closed issues
+	issueData := `{"id": "open-1", "title": "Open Issue One", "status": "open", "priority": 1, "issue_type": "task"}
+{"id": "open-2", "title": "Open Issue Two", "status": "open", "priority": 2, "issue_type": "bug"}
+{"id": "closed-1", "title": "Closed Issue One", "status": "closed", "priority": 1, "issue_type": "task"}
+{"id": "closed-2", "title": "Closed Issue Two", "status": "closed", "priority": 2, "issue_type": "feature"}
+{"id": "inprogress-1", "title": "In Progress Issue", "status": "in_progress", "priority": 1, "issue_type": "task"}`
+	if err := os.WriteFile(filepath.Join(beadsPath, "issues.jsonl"), []byte(issueData), 0o644); err != nil {
+		t.Fatalf("write issues.jsonl: %v", err)
+	}
+
+	exportDir := filepath.Join(repoDir, "bv-pages")
+
+	// Export with --pages-include-closed=false
+	cmd := exec.Command(bv, "--export-pages", exportDir, "--pages-include-closed=false")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("--export-pages failed: %v\n%s", err, out)
+	}
+
+	// Verify SQLite database content
+	dbPath := filepath.Join(exportDir, "beads.sqlite3")
+	issues := queryAllIssues(t, dbPath)
+
+	// Should have 3 non-closed issues (2 open + 1 in_progress)
+	if len(issues) != 3 {
+		t.Errorf("SQLite issue count = %d, want 3 (excluding 2 closed)", len(issues))
+	}
+
+	// Verify closed issues are NOT in database
+	for _, issue := range issues {
+		if issue.Status == "closed" {
+			t.Errorf("Found closed issue %s in database, should be excluded", issue.ID)
+		}
+	}
+
+	// Verify open issues ARE in database
+	foundOpen1 := false
+	foundOpen2 := false
+	foundInProgress := false
+	for _, issue := range issues {
+		switch issue.ID {
+		case "open-1":
+			foundOpen1 = true
+		case "open-2":
+			foundOpen2 = true
+		case "inprogress-1":
+			foundInProgress = true
+		}
+	}
+	if !foundOpen1 || !foundOpen2 || !foundInProgress {
+		t.Errorf("Missing expected issues: open-1=%v, open-2=%v, inprogress-1=%v",
+			foundOpen1, foundOpen2, foundInProgress)
+	}
+}
+
+// TestExportPages_ExcludeHistory verifies history.json is absent
+// when --pages-include-history=false.
+func TestExportPages_ExcludeHistory(t *testing.T) {
+	bv := buildBvBinary(t)
+	stageViewerAssets(t, bv)
+
+	repoDir, _ := createHistoryRepo(t)
+	exportDir := filepath.Join(repoDir, "bv-pages")
+
+	// Export with --pages-include-history=false
+	cmd := exec.Command(bv, "--export-pages", exportDir, "--pages-include-history=false")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("--export-pages failed: %v\n%s", err, out)
+	}
+
+	// Verify history.json does NOT exist
+	historyPath := filepath.Join(exportDir, "data", "history.json")
+	if _, err := os.Stat(historyPath); !os.IsNotExist(err) {
+		t.Error("history.json should NOT exist when --pages-include-history=false")
+	}
+
+	// Verify other core files still exist
+	for _, p := range []string{
+		filepath.Join(exportDir, "index.html"),
+		filepath.Join(exportDir, "beads.sqlite3"),
+		filepath.Join(exportDir, "data", "meta.json"),
+		filepath.Join(exportDir, "data", "triage.json"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("missing expected artifact %s: %v", p, err)
+		}
+	}
+}
+
+// TestExportPages_BothExcluded verifies minimal export with both flags false.
+func TestExportPages_BothExcluded(t *testing.T) {
+	bv := buildBvBinary(t)
+	stageViewerAssets(t, bv)
+
+	repoDir, _ := createHistoryRepo(t)
+	exportDir := filepath.Join(repoDir, "bv-pages")
+
+	// Export with both exclusions
+	cmd := exec.Command(bv, "--export-pages", exportDir,
+		"--pages-include-closed=false",
+		"--pages-include-history=false")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("--export-pages failed: %v\n%s", err, out)
+	}
+
+	// Verify history.json does NOT exist
+	historyPath := filepath.Join(exportDir, "data", "history.json")
+	if _, err := os.Stat(historyPath); !os.IsNotExist(err) {
+		t.Error("history.json should NOT exist")
+	}
+
+	// Verify SQLite has no closed issues
+	dbPath := filepath.Join(exportDir, "beads.sqlite3")
+	issues := queryAllIssues(t, dbPath)
+	for _, issue := range issues {
+		if issue.Status == "closed" {
+			t.Errorf("Found closed issue %s in database, should be excluded", issue.ID)
+		}
+	}
+}
+
+// TestExportPages_FTS5Searchable verifies the FTS5 index is created and searchable.
+func TestExportPages_FTS5Searchable(t *testing.T) {
+	bv := buildBvBinary(t)
+	stageViewerAssets(t, bv)
+
+	repoDir := t.TempDir()
+	beadsPath := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsPath, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	// Create issues with searchable content
+	issueData := `{"id": "auth-1", "title": "Implement OAuth2 authentication", "description": "Add Google and GitHub OAuth providers", "status": "open", "priority": 1, "issue_type": "feature"}
+{"id": "api-1", "title": "REST API rate limiting", "description": "Implement token bucket algorithm for rate limiting", "status": "open", "priority": 2, "issue_type": "task"}
+{"id": "bug-1", "title": "Fix login redirect bug", "description": "Users are redirected incorrectly after OAuth callback", "status": "open", "priority": 1, "issue_type": "bug"}`
+	if err := os.WriteFile(filepath.Join(beadsPath, "issues.jsonl"), []byte(issueData), 0o644); err != nil {
+		t.Fatalf("write issues.jsonl: %v", err)
+	}
+
+	exportDir := filepath.Join(repoDir, "bv-pages")
+	cmd := exec.Command(bv, "--export-pages", exportDir)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("--export-pages failed: %v\n%s", err, out)
+	}
+
+	// Test FTS5 search queries
+	dbPath := filepath.Join(exportDir, "beads.sqlite3")
+
+	// Search for "OAuth" - should find 2 issues (auth-1 and bug-1)
+	oauthResults := searchFTS(t, dbPath, "OAuth")
+	if len(oauthResults) != 2 {
+		t.Errorf("FTS search for 'OAuth' returned %d results, want 2", len(oauthResults))
+	}
+
+	// Search for "rate limiting" - should find 1 issue (api-1)
+	rateResults := searchFTS(t, dbPath, "rate limiting")
+	if len(rateResults) != 1 {
+		t.Errorf("FTS search for 'rate limiting' returned %d results, want 1", len(rateResults))
+	}
+
+	// Search for "nonexistent term" - should find 0 issues
+	emptyResults := searchFTS(t, dbPath, "nonexistent_xyz_term")
+	if len(emptyResults) != 0 {
+		t.Errorf("FTS search for nonexistent term returned %d results, want 0", len(emptyResults))
+	}
+}
+
+// TestExportPages_EmptyProject verifies export handles empty project gracefully.
+func TestExportPages_EmptyProject(t *testing.T) {
+	bv := buildBvBinary(t)
+	stageViewerAssets(t, bv)
+
+	repoDir := t.TempDir()
+	beadsPath := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsPath, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	// Create empty issues file
+	if err := os.WriteFile(filepath.Join(beadsPath, "issues.jsonl"), []byte(""), 0o644); err != nil {
+		t.Fatalf("write empty issues.jsonl: %v", err)
+	}
+
+	exportDir := filepath.Join(repoDir, "bv-pages")
+	cmd := exec.Command(bv, "--export-pages", exportDir)
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
+
+	// Empty project should either succeed with 0 issues or fail gracefully
+	if err != nil {
+		// Acceptable: might fail with "no issues" error
+		t.Logf("Export with empty project failed (acceptable): %v\n%s", err, out)
+		return
+	}
+
+	// If it succeeded, verify meta.json shows 0 issues
+	metaPath := filepath.Join(exportDir, "data", "meta.json")
+	metaBytes, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read meta.json: %v", err)
+	}
+
+	var meta struct {
+		IssueCount int `json:"issue_count"`
+	}
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		t.Fatalf("parse meta.json: %v", err)
+	}
+	if meta.IssueCount != 0 {
+		t.Errorf("issue_count = %d, want 0 for empty project", meta.IssueCount)
+	}
+}
+
+// TestExportPages_OnlyClosedIssues verifies export when all issues are closed
+// and --pages-include-closed=false results in empty export.
+func TestExportPages_OnlyClosedIssues(t *testing.T) {
+	bv := buildBvBinary(t)
+	stageViewerAssets(t, bv)
+
+	repoDir := t.TempDir()
+	beadsPath := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsPath, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	// Create only closed issues
+	issueData := `{"id": "closed-1", "title": "Completed Task 1", "status": "closed", "priority": 1, "issue_type": "task"}
+{"id": "closed-2", "title": "Completed Task 2", "status": "closed", "priority": 2, "issue_type": "task"}
+{"id": "closed-3", "title": "Completed Bug Fix", "status": "closed", "priority": 1, "issue_type": "bug"}`
+	if err := os.WriteFile(filepath.Join(beadsPath, "issues.jsonl"), []byte(issueData), 0o644); err != nil {
+		t.Fatalf("write issues.jsonl: %v", err)
+	}
+
+	exportDir := filepath.Join(repoDir, "bv-pages")
+	cmd := exec.Command(bv, "--export-pages", exportDir, "--pages-include-closed=false")
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
+
+	// Should either succeed with 0 issues or fail gracefully
+	if err != nil {
+		t.Logf("Export with only closed issues (excluded) failed (acceptable): %v\n%s", err, out)
+		return
+	}
+
+	// If succeeded, verify SQLite has 0 issues
+	dbPath := filepath.Join(exportDir, "beads.sqlite3")
+	issues := queryAllIssues(t, dbPath)
+	if len(issues) != 0 {
+		t.Errorf("SQLite has %d issues, want 0 (all closed and excluded)", len(issues))
+	}
+}
+
+// TestExportPages_UnicodeContent verifies export handles Unicode correctly.
+func TestExportPages_UnicodeContent(t *testing.T) {
+	bv := buildBvBinary(t)
+	stageViewerAssets(t, bv)
+
+	repoDir := t.TempDir()
+	beadsPath := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsPath, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	// Create issues with Unicode content
+	issueData := `{"id": "unicode-1", "title": "日本語タイトル", "description": "説明文はこちら", "status": "open", "priority": 1, "issue_type": "task"}
+{"id": "unicode-2", "title": "Émoji test 🚀🎉✨", "description": "Contains emojis: 👍 🔥 💯", "status": "open", "priority": 2, "issue_type": "feature"}
+{"id": "unicode-3", "title": "Ü̶n̶i̶c̶o̶d̶e̶ special chars", "description": "Test: é à ü ñ ø æ ß", "status": "open", "priority": 1, "issue_type": "bug"}
+{"id": "unicode-4", "title": "中文标题测试", "description": "中文描述内容", "status": "open", "priority": 2, "issue_type": "task"}`
+	if err := os.WriteFile(filepath.Join(beadsPath, "issues.jsonl"), []byte(issueData), 0o644); err != nil {
+		t.Fatalf("write issues.jsonl: %v", err)
+	}
+
+	exportDir := filepath.Join(repoDir, "bv-pages")
+	cmd := exec.Command(bv, "--export-pages", exportDir)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("--export-pages failed: %v\n%s", err, out)
+	}
+
+	// Verify all issues are in SQLite with correct titles
+	dbPath := filepath.Join(exportDir, "beads.sqlite3")
+	issues := queryAllIssues(t, dbPath)
+
+	if len(issues) != 4 {
+		t.Fatalf("SQLite has %d issues, want 4", len(issues))
+	}
+
+	// Verify Unicode titles are preserved
+	expectedTitles := map[string]string{
+		"unicode-1": "日本語タイトル",
+		"unicode-2": "Émoji test 🚀🎉✨",
+		"unicode-3": "Ü̶n̶i̶c̶o̶d̶e̶ special chars",
+		"unicode-4": "中文标题测试",
+	}
+
+	for _, issue := range issues {
+		expected, ok := expectedTitles[issue.ID]
+		if !ok {
+			t.Errorf("Unexpected issue ID: %s", issue.ID)
+			continue
+		}
+		if issue.Title != expected {
+			t.Errorf("Issue %s title mismatch:\n  got:  %q\n  want: %q", issue.ID, issue.Title, expected)
+		}
+	}
+
+	// Test FTS search with Unicode
+	// Note: The porter tokenizer may not handle CJK characters well,
+	// so we test with Latin characters that have diacritics instead
+	emojiResults := searchFTS(t, dbPath, "Émoji")
+	if len(emojiResults) != 1 {
+		// Diacritics might be normalized, try without
+		emojiResults = searchFTS(t, dbPath, "emoji")
+		if len(emojiResults) != 1 {
+			t.Logf("FTS search for 'emoji' returned %d results (tokenizer may not handle accented chars)", len(emojiResults))
+		}
+	}
+
+	// CJK search may not work with porter tokenizer - just log, don't fail
+	japaneseResults := searchFTS(t, dbPath, "日本語")
+	if len(japaneseResults) == 0 {
+		t.Log("Note: FTS5 porter tokenizer doesn't support CJK search (expected)")
+	}
+}
+
+// ============================================================================
+// Helper functions for bv-qnlb tests
+// ============================================================================
+
+// sqliteIssue represents an issue row from the SQLite database.
+type sqliteIssue struct {
+	ID          string
+	Title       string
+	Description string
+	Status      string
+	Priority    int
+	IssueType   string
+}
+
+// queryAllIssues queries all issues from the SQLite database.
+func queryAllIssues(t *testing.T, dbPath string) []sqliteIssue {
+	t.Helper()
+
+	db, err := openSQLiteDB(dbPath)
+	if err != nil {
+		t.Fatalf("open database %s: %v", dbPath, err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query("SELECT id, title, COALESCE(description, ''), status, priority, issue_type FROM issues")
+	if err != nil {
+		t.Fatalf("query issues: %v", err)
+	}
+	defer rows.Close()
+
+	var issues []sqliteIssue
+	for rows.Next() {
+		var issue sqliteIssue
+		if err := rows.Scan(&issue.ID, &issue.Title, &issue.Description, &issue.Status, &issue.Priority, &issue.IssueType); err != nil {
+			t.Fatalf("scan issue: %v", err)
+		}
+		issues = append(issues, issue)
+	}
+
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows error: %v", err)
+	}
+
+	return issues
+}
+
+// searchFTS performs an FTS5 search and returns matching issue IDs.
+func searchFTS(t *testing.T, dbPath, query string) []string {
+	t.Helper()
+
+	db, err := openSQLiteDB(dbPath)
+	if err != nil {
+		t.Fatalf("open database %s: %v", dbPath, err)
+	}
+	defer db.Close()
+
+	// FTS5 search query
+	rows, err := db.Query("SELECT id FROM issues_fts WHERE issues_fts MATCH ?", query)
+	if err != nil {
+		// FTS5 might not be available, log and return empty
+		t.Logf("FTS5 query failed (might not be available): %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan FTS result: %v", err)
+		}
+		ids = append(ids, id)
+	}
+
+	return ids
+}
+
+// openSQLiteDB opens a SQLite database for testing.
+// Uses the same driver as the export code (modernc.org/sqlite).
+func openSQLiteDB(dbPath string) (*sql.DB, error) {
+	return sql.Open("sqlite", dbPath)
 }
