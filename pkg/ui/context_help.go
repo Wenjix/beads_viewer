@@ -168,17 +168,21 @@ const contextHelpInsights = `## Insights Panel
 const contextHelpHistory = `## History View
 
 **Navigation**
-  j/k       Navigate timeline
+  j/k       Navigate primary pane
+  J/K       Navigate secondary pane
+  Tab       Toggle focus between panes
   Enter     Jump to selected bead
+
+**View Modes**
+  v         Toggle Bead/Git mode
+  /         Search commits/beads
+  c         Cycle confidence filter
+
+**Actions**
   y         Copy commit SHA
   o         Open commit in browser
   g         Go to graph view
-  h/Esc     Return to list
-
-**Timeline Shows**
-• Git commits with bead changes
-• Bead-only changes (bd commands)
-• Time-travel preview available`
+  h/Esc     Return to list`
 
 const contextHelpDetail = `## Detail View
 
