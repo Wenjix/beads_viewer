@@ -1480,8 +1480,9 @@ func (m *InsightsModel) renderHeatmapPanel(width, height int, t Theme) string {
 		fmt.Sprintf("%*d", cellWidth, grandTotal)))
 	sb.WriteString("\n")
 
-	// Selection info bar
-	if isFocused {
+	// Selection info bar (with bounds checking for safety)
+	if isFocused && m.heatmapRow >= 0 && m.heatmapRow < len(depthLabels) &&
+		m.heatmapCol >= 0 && m.heatmapCol < len(scoreLabels) {
 		sb.WriteString("\n")
 		selCount := m.HeatmapCellCount()
 		selStyle := t.Renderer.NewStyle().Foreground(t.Primary)
@@ -1564,10 +1565,18 @@ func (m *InsightsModel) renderHeatmapDrillDown(width int, t Theme) string {
 	depthLabels := []string{"D=0", "D1-2", "D3-5", "D6-10", "D10+"}
 	scoreLabels := []string{"0-.2", ".2-.4", ".4-.6", ".6-.8", ".8-1"}
 
-	// Header showing which cell we're viewing
+	// Header showing which cell we're viewing (with bounds checking)
+	depthLabel := "?"
+	scoreLabel := "?"
+	if m.heatmapRow >= 0 && m.heatmapRow < len(depthLabels) {
+		depthLabel = depthLabels[m.heatmapRow]
+	}
+	if m.heatmapCol >= 0 && m.heatmapCol < len(scoreLabels) {
+		scoreLabel = scoreLabels[m.heatmapCol]
+	}
 	titleStyle := t.Renderer.NewStyle().Bold(true).Foreground(t.Primary)
 	sb.WriteString(titleStyle.Render(fmt.Sprintf("📋 Issues in %s × %s (%d items)",
-		depthLabels[m.heatmapRow], scoreLabels[m.heatmapCol], len(m.heatmapIssues))))
+		depthLabel, scoreLabel, len(m.heatmapIssues))))
 	sb.WriteString("\n")
 
 	// Navigation hints
@@ -1638,17 +1647,19 @@ func (m *InsightsModel) renderDrillDownIssue(issueID string, isSelected bool, wi
 		icon = "📋"
 	case "chore":
 		icon = "🔧"
+	case "epic":
+		icon = "🎯"
 	}
 	sb.WriteString(icon + " ")
 
-	// Status indicator
+	// Status indicator (matches model.Status constants)
 	statusColor := t.Secondary
 	switch issue.Status {
-	case "open", "todo":
+	case "open":
 		statusColor = t.Open
-	case "in_progress", "in-progress":
+	case "in_progress":
 		statusColor = t.InProgress
-	case "done", "closed":
+	case "closed":
 		statusColor = t.Closed
 	case "blocked":
 		statusColor = t.Blocked

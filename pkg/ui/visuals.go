@@ -126,22 +126,6 @@ func GetHeatGradientColorBg(intensity float64) (bg lipgloss.Color, fg lipgloss.C
 	}
 }
 
-// GetContrastColor returns white or black text color for best contrast (bv-t4yg)
-func GetContrastColor(bg lipgloss.Color) lipgloss.Color {
-	// Simple heuristic: lighter backgrounds get dark text
-	bgStr := string(bg)
-	if len(bgStr) >= 7 && bgStr[0] == '#' {
-		// Parse hex color and check if it's "light"
-		if bgStr[1] >= 'a' || bgStr[1] >= 'A' || (bgStr[1] >= '8' && bgStr[1] <= '9') {
-			return lipgloss.Color("#1a1a2e") // Dark text
-		}
-		if bgStr[1] == 'f' || bgStr[1] == 'F' || bgStr[1] == 'e' || bgStr[1] == 'E' {
-			return lipgloss.Color("#1a1a2e") // Dark text for F/E prefixed colors
-		}
-	}
-	return lipgloss.Color("#ffffff") // White text by default
-}
-
 // RepoColors maps repo prefixes to distinctive colors for visual differentiation
 var RepoColors = []lipgloss.Color{
 	lipgloss.Color("#FF6B6B"), // Coral red
