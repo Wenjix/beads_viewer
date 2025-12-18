@@ -23,6 +23,28 @@ const (
 	SignalOrphanAuthor OrphanSignal = "author"
 )
 
+// Pre-compiled regex patterns for message analysis (compiled once at init).
+var (
+	// Message patterns for detecting bead-related commits
+	orphanMessagePatterns = []struct {
+		re     *regexp.Regexp
+		weight int
+	}{
+		{regexp.MustCompile(`\b(fix|fixes|fixed)\b`), 10},
+		{regexp.MustCompile(`\b(close|closes|closed)\b`), 10},
+		{regexp.MustCompile(`\b(resolve|resolves|resolved)\b`), 10},
+		{regexp.MustCompile(`\b(implement|implements|implemented)\b`), 8},
+		{regexp.MustCompile(`\b(add|adds|added)\b`), 5},
+		{regexp.MustCompile(`#\d+`), 15},               // Issue number reference
+		{regexp.MustCompile(`\b[a-z]{2,5}-\d+\b`), 20}, // JIRA-style ID (lowercase since message is lowercased)
+		{regexp.MustCompile(`\bbv-[a-z0-9]+\b`), 25},   // bv-xxx pattern
+		{regexp.MustCompile(`\bbeads?[-_]?\d+\b`), 25}, // bead-123 pattern
+	}
+
+	// Pattern for extracting specific bead IDs from messages
+	orphanBeadIDPattern = regexp.MustCompile(`(?i)\bbv-([a-z0-9]{4,8})\b`) // Case-insensitive
+)
+
 // OrphanCandidate represents a commit that might be missing a bead linkage.
 type OrphanCandidate struct {
 	// Commit information
@@ -325,26 +347,11 @@ func (od *OrphanDetector) checkFiles(candidate *OrphanCandidate, beadScores map[
 func (od *OrphanDetector) checkMessage(candidate *OrphanCandidate, beadScores map[string]*probableBeadBuilder) {
 	msg := strings.ToLower(candidate.Message)
 
-	// Look for bead-like patterns that aren't in the index
-	patterns := []struct {
-		re     *regexp.Regexp
-		weight int
-	}{
-		{regexp.MustCompile(`\b(fix|fixes|fixed)\b`), 10},
-		{regexp.MustCompile(`\b(close|closes|closed)\b`), 10},
-		{regexp.MustCompile(`\b(resolve|resolves|resolved)\b`), 10},
-		{regexp.MustCompile(`\b(implement|implements|implemented)\b`), 8},
-		{regexp.MustCompile(`\b(add|adds|added)\b`), 5},
-		{regexp.MustCompile(`#\d+`), 15},               // Issue number reference
-		{regexp.MustCompile(`\b[A-Z]{2,5}-\d+\b`), 20}, // JIRA-style ID
-		{regexp.MustCompile(`\bbv-[a-z0-9]+\b`), 25},   // bv-xxx pattern
-		{regexp.MustCompile(`\bbeads?[-_]?\d+\b`), 25}, // bead-123 pattern
-	}
-
+	// Look for bead-like patterns (using pre-compiled regexes)
 	totalWeight := 0
 	var matchDetails []string
 
-	for _, p := range patterns {
+	for _, p := range orphanMessagePatterns {
 		if p.re.MatchString(msg) {
 			totalWeight += p.weight
 			match := p.re.FindString(msg)
@@ -360,12 +367,11 @@ func (od *OrphanDetector) checkMessage(candidate *OrphanCandidate, beadScores ma
 		})
 	}
 
-	// Try to match specific bead IDs mentioned in message
-	beadIDPattern := regexp.MustCompile(`bv-([a-z0-9]{4,8})`)
-	matches := beadIDPattern.FindAllStringSubmatch(candidate.Message, -1)
+	// Try to match specific bead IDs mentioned in message (case-insensitive)
+	matches := orphanBeadIDPattern.FindAllStringSubmatch(msg, -1)
 	for _, match := range matches {
 		if len(match) >= 2 {
-			beadID := "bv-" + match[1]
+			beadID := "bv-" + strings.ToLower(match[1]) // Normalize to lowercase
 			if history, ok := od.lookup.beads[beadID]; ok {
 				if _, exists := beadScores[beadID]; !exists {
 					beadScores[beadID] = &probableBeadBuilder{
@@ -413,7 +419,11 @@ func (od *OrphanDetector) checkAuthor(candidate *OrphanCandidate, beadScores map
 			})
 
 			if _, ok := beadScores[beadID]; !ok {
-				history := od.lookup.beads[beadID]
+				history, exists := od.lookup.beads[beadID]
+				if !exists {
+					// Bead not in lookup - use window info as fallback
+					history = BeadHistory{Title: window.Title, Status: "unknown"}
+				}
 				beadScores[beadID] = &probableBeadBuilder{
 					title:  history.Title,
 					status: history.Status,
