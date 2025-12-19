@@ -1,14 +1,218 @@
-### Using bv as an AI sidecar
+# AGENTS.md — beads_viewer
+
+## RULE 1 – ABSOLUTE (DO NOT EVER VIOLATE THIS)
+
+You may NOT delete any file or directory unless I explicitly give the exact command **in this session**.
+
+- This includes files you just created (tests, tmp files, scripts, etc.).
+- You do not get to decide that something is "safe" to remove.
+- If you think something should be removed, stop and ask. You must receive clear written approval **before** any deletion command is even proposed.
+
+Treat "never delete files without permission" as a hard invariant.
+
+---
+
+### IRREVERSIBLE GIT & FILESYSTEM ACTIONS
+
+Absolutely forbidden unless I give the **exact command and explicit approval** in the same message:
+
+- `git reset --hard`
+- `git clean -fd`
+- `rm -rf`
+- Any command that can delete or overwrite code/data
+
+Rules:
+
+1. If you are not 100% sure what a command will delete, do not propose or run it. Ask first.
+2. Prefer safe tools: `git status`, `git diff`, `git stash`, copying to backups, etc.
+3. After approval, restate the command verbatim, list what it will affect, and wait for confirmation.
+4. When a destructive command is run, record in your response:
+   - The exact user text authorizing it
+   - The command run
+   - When you ran it
+
+If that audit trail is missing, then you must act as if the operation never happened.
+
+---
+
+## Go Toolchain
+
+- Use **Go 1.22+** (check `go.mod` for exact version).
+- Build: `go build ./...`
+- Test: `go test ./...` (add `-v` for verbose, `-race` for race detection)
+- Vet: `go vet ./...` (run before commits)
+- Format: `gofmt -w .` or `goimports -w .`
+
+### Key Commands
+
+```bash
+go build ./...                    # Build all packages
+go test ./...                     # Run all tests
+go test ./... -race               # Run with race detector
+go test ./pkg/analysis/... -v     # Verbose tests for specific package
+go vet ./...                      # Static analysis
+gofmt -w .                        # Format all Go files
+```
+
+### Module Management
+
+- Lockfile: `go.sum` (auto-managed by `go mod`)
+- Dependencies: `go mod tidy` to clean up unused deps
+- Never manually edit `go.sum`
+
+---
+
+### Code Editing Discipline
+
+- Do **not** run scripts that bulk-modify code (codemods, invented one-off scripts, giant `sed`/regex refactors).
+- Large mechanical changes: break into smaller, explicit edits and review diffs.
+- Subtle/complex changes: edit by hand, file-by-file, with careful reasoning.
+
+---
+
+### Backwards Compatibility & File Sprawl
+
+We optimize for a clean architecture now, not backwards compatibility.
+
+- No "compat shims" or "v2" file clones.
+- When changing behavior, migrate callers and remove old code **inside the same file**.
+- New files are only for genuinely new domains that don't fit existing modules.
+- The bar for adding files is very high.
+
+---
+
+### Logging & Console Output
+
+- Use structured logging patterns; avoid raw `fmt.Println` for production logs.
+- TUI output goes through lipgloss styling; don't mix raw prints with styled output.
+- Robot mode (`--robot-*`) outputs JSON to stdout; human mode uses styled TUI.
+- Errors should be wrapped with `fmt.Errorf("context: %w", err)` for traceability.
+
+---
+
+### Third-Party Libraries
+
+When unsure of an API, look up current docs rather than guessing. Key dependencies:
+
+- **bubbletea**: TUI framework (Elm architecture)
+- **lipgloss**: Terminal styling
+- **bubbles**: Reusable TUI components
+- **cobra**: CLI framework
+- **viper**: Configuration management
+
+---
+
+## MCP Agent Mail — Multi-Agent Coordination
+
+Agent Mail is available as an MCP server for agent-to-agent coordination. If it's not available, flag to the user—they may need to start it with `am` alias or manually.
+
+**Troubleshooting:** If Agent Mail fails with "Too many open files" (common on macOS), restart with higher limit: `ulimit -n 4096; python -m mcp_agent_mail.cli serve-http`
+
+What Agent Mail gives:
+
+- Identities, inbox/outbox, searchable threads.
+- Advisory file reservations (leases) to avoid agents clobbering each other.
+- Persistent artifacts in git (human-auditable).
+
+Core patterns:
+
+1. **Same repo**
+   - Register identity: `ensure_project` then `register_agent` with the repo's absolute path as `project_key`.
+   - Reserve files before editing: `file_reservation_paths(project_key, agent_name, ["pkg/**"], ttl_seconds=3600, exclusive=true)`.
+   - Communicate: `send_message(..., thread_id="bv-123")`.
+   - Fast reads: `resource://inbox/{Agent}?project=<abs-path>&limit=20`.
+
+2. **Multiple repos**
+   - Same `project_key` for all; use specific reservations (`pkg/**`, `cmd/**`).
+   - Or different projects linked via `macro_contact_handshake`.
+
+Macros vs granular:
+
+- Prefer macros when speed matters: `macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`.
+- Use granular tools when you need explicit behavior.
+
+Common pitfalls:
+
+- "from_agent not registered" → call `register_agent` with correct `project_key`.
+- `FILE_RESERVATION_CONFLICT` → adjust patterns, wait for expiry, or use non-exclusive reservation.
+
+---
+
+## Issue Tracking with bd (beads)
+
+All issue tracking goes through **bd**. No other TODO systems.
+
+Key invariants:
+
+- `.beads/` is authoritative state and **must always be committed** with code changes.
+- Do not edit `.beads/*.jsonl` directly; only via `bd`.
+
+### Basics
+
+Check ready work:
+
+```bash
+bd ready --json
+```
+
+Create issues:
+
+```bash
+bd create "Issue title" -t bug|feature|task -p 0-4 --json
+bd create "Issue title" -p 1 --deps discovered-from:bv-123 --json
+```
+
+Update:
+
+```bash
+bd update bv-42 --status in_progress --json
+bd update bv-42 --priority 1 --json
+```
+
+Complete:
+
+```bash
+bd close bv-42 --reason "Completed" --json
+```
+
+Types:
+
+- `bug`, `feature`, `task`, `epic`, `chore`
+
+Priorities:
+
+- `0` critical (security, data loss, broken builds)
+- `1` high
+- `2` medium (default)
+- `3` low
+- `4` backlog
+
+Agent workflow:
+
+1. `bd ready` to find unblocked work.
+2. Claim: `bd update <id> --status in_progress`.
+3. Implement + test.
+4. If you discover new work, create a new bead with `discovered-from:<parent-id>`.
+5. Close when done.
+6. Commit `.beads/` in the same commit as code changes.
+
+Never:
+
+- Use markdown TODO lists.
+- Use other trackers.
+- Duplicate tracking.
+
+---
+
+## Using bv as an AI Sidecar
 
 bv is a graph-aware triage engine for Beads projects (.beads/beads.jsonl). Instead of parsing JSONL or hallucinating graph traversal, use robot flags for deterministic, dependency-aware outputs with precomputed metrics (PageRank, betweenness, critical path, cycles, HITS, eigenvector, k-core).
 
-**Scope boundary:** bv handles *what to work on* (triage, priority, planning). For agent-to-agent coordination (messaging, work claiming, file reservations), use [MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail).
+**Scope boundary:** bv handles *what to work on* (triage, priority, planning). For agent-to-agent coordination (messaging, work claiming, file reservations), use MCP Agent Mail.
 
 **⚠️ CRITICAL: Use ONLY `--robot-*` flags. Bare `bv` launches an interactive TUI that blocks your session.**
 
-**Troubleshooting Agent Mail:** If Agent Mail fails with "Too many open files" (common on macOS), restart with higher limit: `ulimit -n 4096; python -m mcp_agent_mail.cli serve-http`
-
-#### The Workflow: Start With Triage
+### The Workflow: Start With Triage
 
 **`bv --robot-triage` is your single entry point.** It returns everything you need in one call:
 - `quick_ref`: at-a-glance counts + top 3 picks
@@ -23,7 +227,7 @@ bv --robot-triage        # THE MEGA-COMMAND: start here
 bv --robot-next          # Minimal: just the single top pick + claim command
 ```
 
-#### Other Commands
+### Other Commands
 
 **Planning:**
 | Command | Returns |
@@ -55,7 +259,7 @@ bv --robot-next          # Minimal: just the single top pick + claim command
 | `--robot-graph [--graph-format=json\|dot\|mermaid]` | Dependency graph export |
 | `--export-graph <file.html>` | Self-contained interactive HTML visualization |
 
-#### Scoping & Filtering
+### Scoping & Filtering
 
 ```bash
 bv --robot-plan --label backend              # Scope to label's subgraph
@@ -66,7 +270,7 @@ bv --robot-triage --robot-triage-by-track    # Group by parallel work streams
 bv --robot-triage --robot-triage-by-label    # Group by domain
 ```
 
-#### Understanding Robot Output
+### Understanding Robot Output
 
 **All robot JSON includes:**
 - `data_hash` — Fingerprint of source beads.jsonl (verify consistency across calls)
@@ -79,7 +283,7 @@ bv --robot-triage --robot-triage-by-label    # Group by domain
 
 **For large graphs (>500 nodes):** Some metrics may be approximated or skipped. Always check `status`.
 
-#### jq Quick Reference
+### jq Quick Reference
 
 ```bash
 bv --robot-triage | jq '.quick_ref'                        # At-a-glance summary
@@ -124,150 +328,39 @@ Env defaults:
 
 ### Static Site Export for Stakeholder Reporting
 
-  Generate a static dashboard for non-technical stakeholders:
+Generate a static dashboard for non-technical stakeholders:
 
-  ```bash
-  # Interactive wizard (recommended)
-  bv --pages
+```bash
+# Interactive wizard (recommended)
+bv --pages
 
-  # Or export locally
-  bv --export-pages ./dashboard --pages-title "Sprint 42 Status"
-  ```
+# Or export locally
+bv --export-pages ./dashboard --pages-title "Sprint 42 Status"
+```
 
-  The output is a self-contained HTML/JS bundle that:
-  - Shows triage recommendations (from --robot-triage)
-  - Visualizes dependencies
-  - Supports full-text search (FTS5)
-  - Works offline after initial load
-  - Requires no installation to view
+The output is a self-contained HTML/JS bundle that:
+- Shows triage recommendations (from --robot-triage)
+- Visualizes dependencies
+- Supports full-text search (FTS5)
+- Works offline after initial load
+- Requires no installation to view
 
-  **Deployment options:**
-  - `bv --pages` → Interactive wizard for GitHub Pages deployment
-  - `bv --export-pages ./dir` → Local export for custom hosting
-  - `bv --preview-pages ./dir` → Preview bundle locally
+**Deployment options:**
+- `bv --pages` → Interactive wizard for GitHub Pages deployment
+- `bv --export-pages ./dir` → Local export for custom hosting
+- `bv --preview-pages ./dir` → Preview bundle locally
 
-  **For CI/CD integration:**
-  ```bash
-  bv --export-pages ./bv-pages --pages-title "Nightly Build"
-  # Then deploy ./bv-pages to your hosting of choice
-  ```
+**For CI/CD integration:**
+```bash
+bv --export-pages ./bv-pages --pages-title "Nightly Build"
+# Then deploy ./bv-pages to your hosting of choice
+```
 
 ---
 
-### ast-grep vs ripgrep (quick guidance)
+## Testing Guidelines
 
-**Use `ast-grep` when structure matters.** It parses code and matches AST nodes, so results ignore comments/strings, understand syntax, and can **safely rewrite** code.
-
-* Refactors/codemods: rename APIs, change import forms, rewrite call sites or variable kinds.
-* Policy checks: enforce patterns across a repo (`scan` with rules + `test`).
-* Editor/automation: LSP mode; `--json` output for tooling.
-
-**Use `ripgrep` when text is enough.** It’s the fastest way to grep literals/regex across files.
-
-* Recon: find strings, TODOs, log lines, config values, or non-code assets.
-* Pre-filter: narrow candidate files before a precise pass.
-
-**Rule of thumb**
-
-* Need correctness over speed, or you’ll **apply changes** → start with `ast-grep`.
-* Need raw speed or you’re just **hunting text** → start with `rg`.
-* Often combine: `rg` to shortlist files, then `ast-grep` to match/modify with precision.
-
-**Snippets**
-
-Find structured code (ignores comments/strings):
-
-```bash
-ast-grep run -l TypeScript -p 'import $X from "$P"'
-```
-
-Codemod (only real `var` declarations become `let`):
-
-```bash
-ast-grep run -l JavaScript -p 'var $A = $B' -r 'let $A = $B' -U
-```
-
-Quick textual hunt:
-
-```bash
-rg -n 'console\.log\(' -t js
-```
-
-Combine speed + precision:
-
-```bash
-rg -l -t ts 'useQuery\(' | xargs ast-grep run -l TypeScript -p 'useQuery($A)' -r 'useSuspenseQuery($A)' -U
-```
-
-**Mental model**
-
-* Unit of match: `ast-grep` = node; `rg` = line.
-* False positives: `ast-grep` low; `rg` depends on your regex.
-* Rewrites: `ast-grep` first-class; `rg` requires ad-hoc sed/awk and risks collateral edits.
-
----
-
-## UBS Quick Reference for AI Agents
-
-UBS stands for "Ultimate Bug Scanner": **The AI Coding Agent's Secret Weapon: Flagging Likely Bugs for Fixing Early On**
-
-**Install:**
-
-```bash
-curl -sSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/main/install.sh | bash
-```
-
-**Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
-
-**Commands:**
-
-```bash
-ubs file.ts file2.ts                    # Specific files (< 1s) — USE THIS
-ubs $(git diff --name-only --cached)    # Staged files — before commit
-ubs --only=js,ts src/                   # Language filter (3-5x faster)
-ubs --ci --fail-on-warning .            # CI mode — before PR
-ubs --help                              # Full command reference
-ubs sessions --entries 1                # Tail the latest install session log
-ubs .                                   # Whole project (ignores things like .next, node_modules automatically)
-```
-
-**Output Format:**
-
-```text
-⚠️  Category (N errors)
-    file.ts:42:5 – Issue description
-    💡 Suggested fix
-Exit code: 1
-```
-
-Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fail
-
-**Fix Workflow:**
-
-1. Read finding → category + fix suggestion.
-2. Navigate `file:line:col` → view context.
-3. Verify real issue (not false positive).
-4. Fix root cause (not symptom).
-5. Re-run `ubs <file>` → exit 0.
-6. Commit.
-
-**Speed Critical:** Scope to changed files. `ubs src/file.ts` (< 1s) vs `ubs .` (30s). Never full scan for small edits.
-
-**Bug Severity:**
-
-* **Critical** (always fix): null/undefined safety, injection vulnerabilities, race conditions, resource leaks.
-* **Important** (production): type narrowing, error handling, performance landmines.
-* **Contextual** (judgment): TODO/FIXME, excessive console logs.
-
-**Anti-Patterns:**
-
-* ❌ Ignore findings → ✅ Investigate each.
-* ❌ Full scan per edit → ✅ Scope to changed files.
-* ❌ Fix symptom only → ✅ Fix root cause.
-
----
-
-### Testing: Never Open Browsers
+### Never Open Browsers
 
 **Tests must NEVER automatically open a browser.** All browser-opening functions check `BV_NO_BROWSER` and `BV_TEST_MODE` environment variables. These are set globally via `TestMain` in:
 - `tests/e2e/common_test.go`
@@ -281,100 +374,175 @@ if os.Getenv("BV_NO_BROWSER") != "" || os.Getenv("BV_TEST_MODE") != "" {
 }
 ```
 
+### Test Commands
+
+```bash
+go test ./...                           # All tests
+go test ./pkg/analysis/... -v           # Verbose for specific package
+go test ./tests/e2e/... -v              # E2E tests
+go test ./... -race                     # With race detector
+go test ./... -cover                    # With coverage
+go test -run TestSpecificName ./pkg/... # Run specific test
+```
+
+### Test Patterns
+
+- Use table-driven tests for multiple cases
+- Use `t.TempDir()` for temporary files
+- Use `t.Helper()` in test helpers
+- Check `testing.Short()` for long-running tests
+
 ---
 
-You should try to follow all best practices laid out in the file GOLANG_BEST_PRACTICES.md
+## Go Best Practices
 
+Follow all practices in `GOLANG_BEST_PRACTICES.md`. Key points:
+
+### Error Handling
+
+```go
+// Always wrap errors with context
+if err != nil {
+    return fmt.Errorf("loading config: %w", err)
+}
+
+// Check errors immediately after the call
+result, err := doSomething()
+if err != nil {
+    return err
+}
+```
+
+### Division Safety
+
+```go
+// Always guard against division by zero
+if len(items) > 0 {
+    avg := total / float64(len(items))
+}
+```
+
+### Nil Checks
+
+```go
+// Check for nil before dereferencing
+if dep != nil && dep.Type.IsBlocking() {
+    // safe to use dep
+}
+```
+
+### Concurrency
+
+```go
+// Use sync.RWMutex for shared state
+mu.RLock()
+value := sharedMap[key]
+mu.RUnlock()
+
+// Capture channels before unlock to avoid races
+mu.RLock()
+ch := someChannel
+mu.RUnlock()
+for item := range ch {
+    // process
+}
+```
 
 ---
 
+## ast-grep vs ripgrep
 
-### Morph Warp Grep — AI-powered code search
+**Use `ast-grep` when structure matters.** It parses code and matches AST nodes, so results ignore comments/strings, understand syntax, and can safely rewrite code.
 
-**Use `mcp__morph-mcp__warp_grep` for exploratory "how does X work?" questions.** An AI search agent automatically expands your query into multiple search patterns, greps the codebase, reads relevant files, and returns precise line ranges with full context—all in one call.
+- Refactors/codemods: rename APIs, change patterns
+- Policy checks: enforce patterns across a repo
 
-**Use `ripgrep` (via Grep tool) for targeted searches.** When you know exactly what you're looking for—a specific function name, error message, or config key—ripgrep is faster and more direct.
+**Use `ripgrep` when text is enough.** Fastest way to grep literals/regex.
 
-**Use `ast-grep` for structural code patterns.** When you need to match/rewrite AST nodes while ignoring comments/strings, or enforce codebase-wide rules.
+- Recon: find strings, TODOs, config values
+- Pre-filter: narrow candidates before precise pass
 
-**When to use what**
+**Go-specific examples:**
 
-| Scenario | Tool | Why |
-|----------|------|-----|
-| "How is authentication implemented?" | `warp_grep` | Exploratory; don't know where to start |
-| "Where is the L3 Guardian appeals system?" | `warp_grep` | Need to understand architecture, find multiple related files |
-| "Find all uses of `useQuery(`" | `ripgrep` | Targeted literal search |
-| "Find files with `console.log`" | `ripgrep` | Simple pattern, known target |
-| "Rename `getUserById` → `fetchUser`" | `ast-grep` | Structural refactor, avoid comments/strings |
-| "Replace all `var` with `let`" | `ast-grep` | Codemod across codebase |
+```bash
+# Find all error returns without wrapping
+ast-grep run -l Go -p 'return err'
 
-**warp_grep strengths**
+# Find all fmt.Println (should use structured logging)
+ast-grep run -l Go -p 'fmt.Println($$$)'
 
-* **Reduces context pollution**: Returns only relevant line ranges, not entire files.
-* **Intelligent expansion**: Turns "appeals system" into searches for `appeal`, `Appeals`, `guardian`, `L3`, etc.
-* **One-shot answers**: Finds the 3-5 most relevant files with precise locations vs. manual grep→read cycles.
-* **Natural language**: Works well with "how", "where", "what" questions.
+# Quick grep for a function name
+rg -n 'func.*LoadConfig' -t go
 
-**warp_grep usage**
+# Combine: find files then match precisely
+rg -l -t go 'sync.Mutex' | xargs ast-grep run -l Go -p 'mu.Lock()'
+```
 
+---
+
+## Morph Warp Grep — AI-Powered Code Search
+
+**Use `mcp__morph-mcp__warp_grep` for exploratory "how does X work?" questions.** An AI search agent automatically expands your query into multiple search patterns, greps the codebase, reads relevant files, and returns precise line ranges.
+
+**Use `ripgrep` for targeted searches.** When you know exactly what you're looking for.
+
+| Scenario | Tool |
+|----------|------|
+| "How is graph analysis implemented?" | `warp_grep` |
+| "Where is PageRank computed?" | `warp_grep` |
+| "Find all uses of `NewAnalyzer`" | `ripgrep` |
+| "Rename function across codebase" | `ast-grep` |
+
+**warp_grep usage:**
 ```
 mcp__morph-mcp__warp_grep(
-  repoPath: "/data/projects/communitai",
-  query: "How is the L3 Guardian appeals system implemented?"
+  repoPath: "/path/to/beads_viewer",
+  query: "How does the correlation package detect orphan commits?"
 )
 ```
 
-Returns structured results with file paths, line ranges, and extracted code snippets.
+**Anti-patterns:**
+- ❌ Using `warp_grep` to find a known function name → use `ripgrep`
+- ❌ Using `ripgrep` to understand architecture → use `warp_grep`
 
-**Rule of thumb**
+---
 
-* **Don't know where to look** → `warp_grep` (let AI find it)
-* **Know the pattern** → `ripgrep` (fastest)
-* **Need AST precision** → `ast-grep` (safest for rewrites)
+## UBS Quick Reference
 
-**Anti-patterns**
+UBS = "Ultimate Bug Scanner" — static analysis for catching bugs early.
 
-* ❌ Using `warp_grep` to find a specific function name you already know → use `ripgrep`
-* ❌ Using `ripgrep` to understand "how does X work" → wastes time with manual file reads
-* ❌ Using `ripgrep` for codemods → misses comments/strings, risks collateral edits
+**Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
 
-### Morph Warp Grep vs Standard Grep
+```bash
+ubs file.go file2.go                    # Specific files (< 1s)
+ubs $(git diff --name-only --cached)    # Staged files
+ubs --only=go pkg/                      # Go files only
+ubs .                                   # Whole project
+```
 
-Warp Grep = AI agent that greps, reads, follows connections, returns synthesized context with line numbers.
-Standard Grep = Fast regex match, you interpret results.
+**Output Format:**
+```
+⚠️  Category (N errors)
+    file.go:42:5 – Issue description
+    💡 Suggested fix
+Exit code: 1
+```
 
-Decision: Can you write the grep pattern?
-- Yes → Grep
-- No, you have a question → mcp__morph-mcp__warp_grep
+**Fix Workflow:**
+1. Read finding → understand the issue
+2. Navigate `file:line:col` → view context
+3. Verify real issue (not false positive)
+4. Fix root cause
+5. Re-run `ubs <file>` → exit 0
+6. Commit
 
-#### Warp Grep Queries (natural language, unknown location)
-"How does the moderation appeals flow work?"
-"Where are websocket connections managed?"
-"What happens when a user submits a post?"
-"Where is rate limiting implemented?"
-"How does the auth session get validated on API routes?"
-"What services touch the moderationDecisions table?"
+**Bug Severity (Go-specific):**
+- **Critical**: nil dereference, division by zero, race conditions, resource leaks
+- **Important**: error handling, type assertions without check
+- **Contextual**: TODO/FIXME, unused variables
 
-#### Standard Grep Queries (known pattern, specific target)
-pattern="fileAppeal"                          # known function name
-pattern="class.*Service"                      # structural pattern
-pattern="TODO|FIXME|HACK"                     # markers
-pattern="processenv" path="apps/web"      # specific string
-pattern="import.*from [']@/lib/db"          # import tracing
+---
 
-#### What Warp Grep Does Internally
-One query → 15-30 operations: greps multiple patterns → reads relevant sections → follows imports/references → returns focused line ranges (e.g., l3-guardian.ts:269-440) not whole files.
+## Contribution Policy
 
-#### Anti-patterns
-| Don't Use Warp Grep For | Why | Use Instead |
-|------------------------|-----|-------------|
-| "Find function handleSubmit" | Known name | Grep pattern="handleSubmit" |
-| "Read the auth config" | Known file | Read file_path="lib/auth/..." |
-| "Check if X exists" | Boolean answer | Grep + check results |
-| Quick lookups mid-task | 5-10s latency | Grep is 100ms |
-
-#### When Warp Grep Wins
-- Tracing data flow across files (API → service → schema → types)
-- Understanding unfamiliar subsystems before modifying
-- Answering "how" questions that span 3+ files
-- Finding all touching points for a cross-cutting concern
+Remove any mention of contributing/contributors from README and don't reinsert it.
