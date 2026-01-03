@@ -99,13 +99,13 @@ const contextHelpList = `## List View
   o         Open issues only
   c         Closed issues only
   r         Ready (no blockers)
-  a         All issues
   /         Fuzzy search
   Ctrl+S    Semantic search (AI)
   H         Hybrid ranking
   Alt+H     Hybrid preset
 
 **Switch Views**
+  a         Actionable view
   b         Board view
   g         Graph view
   i         Insights panel

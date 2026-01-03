@@ -694,7 +694,7 @@ func structuredTutorialPages() []StructuredTutorialPage {
 			Section: "Advanced",
 			Elements: []TutorialElement{
 				Section{Title: "Saved filter combinations"},
-				Paragraph{Text: "Press R to open the recipe picker."},
+				Paragraph{Text: "Press ' (single quote) to open the recipe picker."},
 				Spacer{Lines: 1},
 				Section{Title: "Built-in Recipes"},
 				KeyTable{Bindings: []KeyBinding{
