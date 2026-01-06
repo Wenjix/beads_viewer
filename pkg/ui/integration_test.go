@@ -1,6 +1,7 @@
 package ui_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -548,7 +549,7 @@ func TestViewRenderingAtDifferentSizes(t *testing.T) {
 				name = viewKey
 			}
 
-			t.Run(name+"_"+string(rune(size.width))+"x"+string(rune(size.height)), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s_%dx%d", name, size.width, size.height), func(t *testing.T) {
 				m := ui.NewModel(issues, nil, "")
 
 				// Set size
