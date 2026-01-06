@@ -52,33 +52,29 @@ function Get-GoVersion {
 }
 
 function Get-InstallDir {
-    # Use GOBIN if set
-    if ($env:GOBIN -and (Test-Path $env:GOBIN)) {
+    # Use GOBIN if set (go install will create it if needed)
+    if ($env:GOBIN) {
         return $env:GOBIN
     }
 
     # Use GOPATH/bin if GOPATH is set
     if ($env:GOPATH) {
-        $goBin = Join-Path $env:GOPATH "bin"
-        if (-not (Test-Path $goBin)) {
-            New-Item -ItemType Directory -Path $goBin -Force | Out-Null
-        }
-        return $goBin
+        return Join-Path $env:GOPATH "bin"
     }
 
-    # Default to ~/go/bin
-    $defaultGoBin = Join-Path $env:USERPROFILE "go\bin"
-    if (-not (Test-Path $defaultGoBin)) {
-        New-Item -ItemType Directory -Path $defaultGoBin -Force | Out-Null
-    }
-    return $defaultGoBin
+    # Default to ~/go/bin (go install will create it if needed)
+    return Join-Path $env:USERPROFILE "go\bin"
 }
 
 function Add-ToPathIfNeeded {
     param([string]$Dir)
 
     $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-    if (-not $userPath -or $userPath -notlike "*$Dir*") {
+    # Use case-insensitive contains check (more robust than -like with wildcards)
+    $pathEntries = if ($userPath) { $userPath -split ';' } else { @() }
+    $alreadyInPath = $pathEntries | Where-Object { $_ -ieq $Dir } | Select-Object -First 1
+
+    if (-not $alreadyInPath) {
         Write-Info "Adding $Dir to user PATH..."
         # Handle case where user PATH is null or empty
         $newPath = if ($userPath) { "$userPath;$Dir" } else { $Dir }
