@@ -214,3 +214,44 @@ func TestFullAnalysisConfig(t *testing.T) {
 		t.Errorf("Expected high max cycles in full config, got %d", cfg.MaxCyclesToStore)
 	}
 }
+
+func TestDefaultConfig_EnvSkipPhase2(t *testing.T) {
+	t.Setenv(EnvSkipPhase2, "1")
+
+	cfg := DefaultConfig()
+
+	if cfg.ComputePageRank || cfg.ComputeHITS || cfg.ComputeCycles || cfg.ComputeEigenvector || cfg.ComputeCriticalPath {
+		t.Errorf("Expected most phase 2 metrics disabled when %s=1, got: %+v", EnvSkipPhase2, cfg)
+	}
+	if cfg.ComputeBetweenness || cfg.BetweennessMode != BetweennessSkip {
+		t.Errorf("Expected betweenness skipped when %s=1, got: ComputeBetweenness=%v mode=%q", EnvSkipPhase2, cfg.ComputeBetweenness, cfg.BetweennessMode)
+	}
+	if cfg.BetweennessSkipReason == "" || cfg.PageRankSkipReason == "" || cfg.HITSSkipReason == "" || cfg.CyclesSkipReason == "" {
+		t.Errorf("Expected skip reasons set when %s=1, got: betweenness=%q pagerank=%q hits=%q cycles=%q", EnvSkipPhase2, cfg.BetweennessSkipReason, cfg.PageRankSkipReason, cfg.HITSSkipReason, cfg.CyclesSkipReason)
+	}
+}
+
+func TestDefaultConfig_EnvPhase2TimeoutOverride(t *testing.T) {
+	t.Setenv(EnvPhase2TimeoutSeconds, "7")
+
+	cfg := DefaultConfig()
+
+	want := 7 * time.Second
+	if cfg.BetweennessTimeout != want || cfg.PageRankTimeout != want || cfg.HITSTimeout != want || cfg.CyclesTimeout != want {
+		t.Errorf("Expected phase 2 timeouts overridden to %v when %s=7, got: betweenness=%v pagerank=%v hits=%v cycles=%v",
+			want, EnvPhase2TimeoutSeconds, cfg.BetweennessTimeout, cfg.PageRankTimeout, cfg.HITSTimeout, cfg.CyclesTimeout)
+	}
+}
+
+func TestDefaultConfig_EnvPhase2TimeoutInvalidIgnored(t *testing.T) {
+	t.Setenv(EnvPhase2TimeoutSeconds, "-1")
+
+	cfg := DefaultConfig()
+
+	// Default config uses 500ms timeouts; invalid env values should be ignored.
+	want := 500 * time.Millisecond
+	if cfg.BetweennessTimeout != want || cfg.PageRankTimeout != want || cfg.HITSTimeout != want || cfg.CyclesTimeout != want {
+		t.Errorf("Expected invalid %s to be ignored and defaults retained, got: betweenness=%v pagerank=%v hits=%v cycles=%v",
+			EnvPhase2TimeoutSeconds, cfg.BetweennessTimeout, cfg.PageRankTimeout, cfg.HITSTimeout, cfg.CyclesTimeout)
+	}
+}

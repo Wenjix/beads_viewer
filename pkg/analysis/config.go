@@ -1,6 +1,11 @@
 package analysis
 
-import "time"
+import (
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
 
 // AnalysisConfig controls which metrics to compute and their timeouts.
 // This enables size-based algorithm selection for optimal performance.
@@ -39,7 +44,7 @@ type AnalysisConfig struct {
 // DefaultConfig returns the default analysis configuration.
 // All metrics enabled with standard timeouts. Uses exact betweenness.
 func DefaultConfig() AnalysisConfig {
-	return AnalysisConfig{
+	cfg := AnalysisConfig{
 		ComputeBetweenness: true,
 		BetweennessMode:    BetweennessExact,
 		BetweennessTimeout: 500 * time.Millisecond,
@@ -57,6 +62,7 @@ func DefaultConfig() AnalysisConfig {
 		ComputeEigenvector:  true,
 		ComputeCriticalPath: true,
 	}
+	return ApplyEnvOverrides(cfg)
 }
 
 // ConfigForSize returns an appropriate configuration based on graph size.
@@ -73,10 +79,11 @@ func ConfigForSize(nodeCount, edgeCount int) AnalysisConfig {
 		density = float64(edgeCount) / float64(nodeCount*(nodeCount-1))
 	}
 
+	var cfg AnalysisConfig
 	switch {
 	case nodeCount < 100:
 		// Small graph: run everything with generous timeouts, exact betweenness
-		return AnalysisConfig{
+		cfg = AnalysisConfig{
 			ComputeBetweenness: true,
 			BetweennessMode:    BetweennessExact,
 			BetweennessTimeout: 2 * time.Second,
@@ -97,7 +104,7 @@ func ConfigForSize(nodeCount, edgeCount int) AnalysisConfig {
 
 	case nodeCount < 500:
 		// Medium graph: standard timeouts, exact betweenness
-		return AnalysisConfig{
+		cfg = AnalysisConfig{
 			ComputeBetweenness: true,
 			BetweennessMode:    BetweennessExact,
 			BetweennessTimeout: 500 * time.Millisecond,
@@ -118,7 +125,7 @@ func ConfigForSize(nodeCount, edgeCount int) AnalysisConfig {
 
 	case nodeCount < 2000:
 		// Large graph: use approximate betweenness, shorter timeouts
-		cfg := AnalysisConfig{
+		cfg = AnalysisConfig{
 			ComputePageRank: true,
 			PageRankTimeout: 300 * time.Millisecond,
 
@@ -145,11 +152,9 @@ func ConfigForSize(nodeCount, edgeCount int) AnalysisConfig {
 			cfg.BetweennessSkipReason = "graph too dense (density > 0.01)"
 		}
 
-		return cfg
-
 	default:
 		// XL graph (>2000 nodes): use approximate betweenness with larger sample
-		cfg := AnalysisConfig{
+		cfg = AnalysisConfig{
 			// Use approximate betweenness for XL graphs
 			ComputeBetweenness:    true,
 			BetweennessMode:       BetweennessApproximate,
@@ -175,15 +180,14 @@ func ConfigForSize(nodeCount, edgeCount int) AnalysisConfig {
 			cfg.ComputeHITS = false
 			cfg.HITSSkipReason = "graph too large and dense"
 		}
-
-		return cfg
 	}
+	return ApplyEnvOverrides(cfg)
 }
 
 // FullAnalysisConfig returns a config that computes all metrics regardless of size.
 // Useful when --force-full-analysis is specified. Uses exact betweenness.
 func FullAnalysisConfig() AnalysisConfig {
-	return AnalysisConfig{
+	cfg := AnalysisConfig{
 		ComputeBetweenness: true,
 		BetweennessMode:    BetweennessExact, // Force exact for full analysis
 		BetweennessTimeout: 30 * time.Second, // Very generous for forced full analysis
@@ -201,6 +205,7 @@ func FullAnalysisConfig() AnalysisConfig {
 		ComputeEigenvector:  true,
 		ComputeCriticalPath: true,
 	}
+	return ApplyEnvOverrides(cfg)
 }
 
 // SkippedMetrics returns a list of metrics that are configured to be skipped.
@@ -239,4 +244,80 @@ func (c AnalysisConfig) SkippedMetrics() []SkippedMetric {
 type SkippedMetric struct {
 	Name   string
 	Reason string
+}
+
+const (
+	// EnvSkipPhase2 disables most Phase 2 metrics (centrality, cycles, critical path).
+	EnvSkipPhase2 = "BV_SKIP_PHASE2"
+	// EnvPhase2TimeoutSeconds overrides per-metric Phase 2 timeouts when set (>0).
+	EnvPhase2TimeoutSeconds = "BV_PHASE2_TIMEOUT_S"
+)
+
+// ApplyEnvOverrides applies environment-variable tunables to the analysis config.
+//
+// Supported:
+//   - BV_SKIP_PHASE2=1: skip expensive Phase 2 metrics (PageRank, Betweenness, HITS, Cycles,
+//     Eigenvector, Critical Path). (k-core/articulation/slack remain enabled.)
+//   - BV_PHASE2_TIMEOUT_S=N: override per-metric timeouts to N seconds (must be >0).
+func ApplyEnvOverrides(cfg AnalysisConfig) AnalysisConfig {
+	if envBool(EnvSkipPhase2) {
+		cfg.ComputeBetweenness = false
+		cfg.BetweennessMode = BetweennessSkip
+		cfg.BetweennessSkipReason = "BV_SKIP_PHASE2 set"
+
+		cfg.ComputePageRank = false
+		cfg.PageRankSkipReason = "BV_SKIP_PHASE2 set"
+
+		cfg.ComputeHITS = false
+		cfg.HITSSkipReason = "BV_SKIP_PHASE2 set"
+
+		cfg.ComputeCycles = false
+		cfg.CyclesSkipReason = "BV_SKIP_PHASE2 set"
+
+		cfg.ComputeEigenvector = false
+		cfg.ComputeCriticalPath = false
+	}
+
+	if seconds, ok := envPositiveInt(EnvPhase2TimeoutSeconds); ok {
+		timeout := time.Duration(seconds) * time.Second
+		if cfg.ComputeBetweenness {
+			cfg.BetweennessTimeout = timeout
+		}
+		if cfg.ComputePageRank {
+			cfg.PageRankTimeout = timeout
+		}
+		if cfg.ComputeHITS {
+			cfg.HITSTimeout = timeout
+		}
+		if cfg.ComputeCycles {
+			cfg.CyclesTimeout = timeout
+		}
+	}
+
+	return cfg
+}
+
+func envPositiveInt(name string) (int, bool) {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func envBool(name string) bool {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return false
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }

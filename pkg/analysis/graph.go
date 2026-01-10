@@ -87,14 +87,14 @@ type GraphStats struct {
 	cycles            [][]string
 
 	// Ranks (1-based, computed for UI optimization)
-	pageRankRank      map[string]int
-	betweennessRank   map[string]int
-	eigenvectorRank   map[string]int
-	hubsRank          map[string]int
-	authoritiesRank   map[string]int
-	criticalPathRank  map[string]int
-	inDegreeRank      map[string]int
-	outDegreeRank     map[string]int
+	pageRankRank     map[string]int
+	betweennessRank  map[string]int
+	eigenvectorRank  map[string]int
+	hubsRank         map[string]int
+	authoritiesRank  map[string]int
+	criticalPathRank map[string]int
+	inDegreeRank     map[string]int
+	outDegreeRank    map[string]int
 
 	// Phase 2 status flags for robot visibility
 	status MetricStatus
@@ -603,6 +603,21 @@ func (a *Analyzer) AnalyzeAsyncWithConfig(ctx context.Context, config AnalysisCo
 	nodeCount := len(a.issueMap)
 	edgeCount := a.g.Edges().Len()
 
+	var cacheKey, dataHash, configHash string
+	if robotDiskCacheEnabled() {
+		issues := make([]model.Issue, 0, len(a.issueMap))
+		for _, issue := range a.issueMap {
+			issues = append(issues, issue)
+		}
+		dataHash = ComputeDataHash(issues)
+		configHash = ComputeConfigHash(&config)
+		cacheKey = dataHash + "|" + configHash
+
+		if cached, ok := getRobotDiskCachedStats(cacheKey); ok {
+			return cached
+		}
+	}
+
 	stats := &GraphStats{
 		OutDegree:         make(map[string]int),
 		InDegree:          make(map[string]int),
@@ -617,15 +632,15 @@ func (a *Analyzer) AnalyzeAsyncWithConfig(ctx context.Context, config AnalysisCo
 		authorities:       make(map[string]float64),
 		criticalPathScore: make(map[string]float64),
 		status: MetricStatus{
-			PageRank:    statusEntry{State: "pending"},
-			Betweenness: statusEntry{State: "pending"},
-			Eigenvector: statusEntry{State: "pending"},
-			HITS:        statusEntry{State: "pending"},
-			Critical:    statusEntry{State: "pending"},
-			Cycles:      statusEntry{State: "pending"},
-			KCore:       statusEntry{State: "pending"},
+			PageRank:     statusEntry{State: "pending"},
+			Betweenness:  statusEntry{State: "pending"},
+			Eigenvector:  statusEntry{State: "pending"},
+			HITS:         statusEntry{State: "pending"},
+			Critical:     statusEntry{State: "pending"},
+			Cycles:       statusEntry{State: "pending"},
+			KCore:        statusEntry{State: "pending"},
 			Articulation: statusEntry{State: "pending"},
-			Slack:       statusEntry{State: "pending"},
+			Slack:        statusEntry{State: "pending"},
 		},
 	}
 
@@ -651,7 +666,7 @@ func (a *Analyzer) AnalyzeAsyncWithConfig(ctx context.Context, config AnalysisCo
 	a.computePhase1(stats)
 
 	// Phase 2: Expensive metrics in background goroutine
-	go a.computePhase2(ctx, stats, config)
+	go a.computePhase2(ctx, stats, config, cacheKey, dataHash, configHash)
 
 	return stats
 }
@@ -676,6 +691,14 @@ func (a *Analyzer) Analyze() GraphStats {
 		hubs:              stats.hubs,
 		authorities:       stats.authorities,
 		criticalPathScore: stats.criticalPathScore,
+		pageRankRank:      stats.pageRankRank,
+		betweennessRank:   stats.betweennessRank,
+		eigenvectorRank:   stats.eigenvectorRank,
+		hubsRank:          stats.hubsRank,
+		authoritiesRank:   stats.authoritiesRank,
+		criticalPathRank:  stats.criticalPathRank,
+		inDegreeRank:      stats.inDegreeRank,
+		outDegreeRank:     stats.outDegreeRank,
 		coreNumber:        stats.coreNumber,
 		articulation:      stats.articulation,
 		slack:             stats.slack,
@@ -703,6 +726,14 @@ func (a *Analyzer) AnalyzeWithConfig(config AnalysisConfig) GraphStats {
 		hubs:              stats.hubs,
 		authorities:       stats.authorities,
 		criticalPathScore: stats.criticalPathScore,
+		pageRankRank:      stats.pageRankRank,
+		betweennessRank:   stats.betweennessRank,
+		eigenvectorRank:   stats.eigenvectorRank,
+		hubsRank:          stats.hubsRank,
+		authoritiesRank:   stats.authoritiesRank,
+		criticalPathRank:  stats.criticalPathRank,
+		inDegreeRank:      stats.inDegreeRank,
+		outDegreeRank:     stats.outDegreeRank,
 		coreNumber:        stats.coreNumber,
 		articulation:      stats.articulation,
 		slack:             stats.slack,
@@ -1017,7 +1048,7 @@ func (a *Analyzer) computePhase2WithProfile(ctx context.Context, stats *GraphSta
 	profile.Articulation = 0 // Computed together with k-core
 
 	slackStart := time.Now()
-	localSlack = a.computeSlack()
+	localSlack = a.computeSlack(stats.TopologicalOrder)
 	profile.Slack = time.Since(slackStart)
 
 	// Compute ranks (background optimization)
@@ -1123,7 +1154,7 @@ func (a *Analyzer) computePhase1(stats *GraphStats) {
 // computePhase2 calculates expensive metrics in background.
 // Computes to local variables first, then atomically assigns under lock.
 // Respects the config to skip expensive algorithms for large graphs.
-func (a *Analyzer) computePhase2(ctx context.Context, stats *GraphStats, config AnalysisConfig) {
+func (a *Analyzer) computePhase2(ctx context.Context, stats *GraphStats, config AnalysisConfig, cacheKey, dataHash, configHash string) {
 	defer close(stats.phase2Done)
 
 	// Recover from panics to prevent crashing the entire application
@@ -1155,6 +1186,10 @@ func (a *Analyzer) computePhase2(ctx context.Context, stats *GraphStats, config 
 	// We discard the profile data as this is the standard run
 	dummyProfile := &StartupProfile{}
 	a.computePhase2WithProfile(ctx, stats, config, dummyProfile)
+
+	if cacheKey != "" {
+		putRobotDiskCachedStats(cacheKey, dataHash, configHash, stats)
+	}
 }
 
 func (a *Analyzer) computeHeights(sorted []graph.Node) map[string]float64 {
@@ -1181,26 +1216,69 @@ func (a *Analyzer) computeHeights(sorted []graph.Node) map[string]float64 {
 	return impactScores
 }
 
-// computeCoreAndArticulation builds an undirected view to derive k-core numbers and articulation points.
-func (a *Analyzer) computeCoreAndArticulation() (map[string]int, map[string]bool) {
-	u := simple.NewUndirectedGraph()
+type undirectedAdjacency struct {
+	nodes     []int64
+	neighbors map[int64][]int64
+}
 
-	// Add nodes
-	nodes := a.g.Nodes()
-	for nodes.Next() {
-		n := nodes.Node()
-		u.AddNode(simple.Node(n.ID()))
+func newUndirectedAdjacency(g *simple.DirectedGraph) undirectedAdjacency {
+	nodesIt := g.Nodes()
+	nodes := make([]int64, 0, nodesIt.Len())
+	for nodesIt.Next() {
+		nodes = append(nodes, nodesIt.Node().ID())
 	}
 
-	// Add undirected edges for each directed edge
-	edges := a.g.Edges()
+	neighborSets := make(map[int64]map[int64]struct{}, len(nodes))
+	edges := g.Edges()
 	for edges.Next() {
 		e := edges.Edge()
-		u.SetEdge(u.NewEdge(u.Node(e.From().ID()), u.Node(e.To().ID())))
+		from, to := e.From().ID(), e.To().ID()
+		if from == to {
+			continue
+		}
+
+		if neighborSets[from] == nil {
+			neighborSets[from] = make(map[int64]struct{})
+		}
+		neighborSets[from][to] = struct{}{}
+
+		if neighborSets[to] == nil {
+			neighborSets[to] = make(map[int64]struct{})
+		}
+		neighborSets[to][from] = struct{}{}
 	}
 
-	core := computeKCore(u)
-	art := findArticulationPoints(u)
+	neighbors := make(map[int64][]int64, len(neighborSets))
+	for id, set := range neighborSets {
+		if len(set) == 0 {
+			continue
+		}
+		list := make([]int64, 0, len(set))
+		for nbr := range set {
+			list = append(list, nbr)
+		}
+		neighbors[id] = list
+	}
+
+	return undirectedAdjacency{
+		nodes:     nodes,
+		neighbors: neighbors,
+	}
+}
+
+func (a undirectedAdjacency) neighborsOf(id int64) []int64 {
+	return a.neighbors[id]
+}
+
+func (a undirectedAdjacency) degree(id int64) int {
+	return len(a.neighbors[id])
+}
+
+// computeCoreAndArticulation builds an undirected view to derive k-core numbers and articulation points.
+func (a *Analyzer) computeCoreAndArticulation() (map[string]int, map[string]bool) {
+	adj := newUndirectedAdjacency(a.g)
+	core := computeKCore(adj)
+	art := findArticulationPoints(adj)
 
 	coreByID := make(map[string]int, len(core))
 	artByID := make(map[string]bool, len(art))
@@ -1215,19 +1293,11 @@ func (a *Analyzer) computeCoreAndArticulation() (map[string]int, map[string]bool
 
 // computeSlack calculates longest-path slack per node (0 on critical path).
 // Edges are interpreted in execution order (prereq -> dependent), i.e., reversed from the stored direction.
-func (a *Analyzer) computeSlack() map[string]float64 {
+func (a *Analyzer) computeSlack(order []string) map[string]float64 {
 	if len(a.issueMap) == 0 {
 		return nil
 	}
 
-	// Topological order (dependencies first)
-	var order []string
-	sorted, err := topo.Sort(a.g)
-	if err == nil {
-		for i := len(sorted) - 1; i >= 0; i-- {
-			order = append(order, a.nodeToID[sorted[i].ID()])
-		}
-	}
 	if len(order) == 0 {
 		return nil
 	}
@@ -1287,72 +1357,101 @@ func (a *Analyzer) computeSlack() map[string]float64 {
 	return slack
 }
 
-// computeKCore returns core numbers using iterative k peeling (handles isolated nodes and preserves correct cores).
-func computeKCore(g *simple.UndirectedGraph) map[int64]int {
-	// Build adjacency and degrees
-	deg := make(map[int64]int)
-	adj := make(map[int64][]int64)
-	nodes := g.Nodes()
-	for nodes.Next() {
-		n := nodes.Node()
-		it := g.From(n.ID())
-		for it.Next() {
-			adj[n.ID()] = append(adj[n.ID()], it.Node().ID())
-		}
-		deg[n.ID()] = len(adj[n.ID()])
+// computeKCore returns per-node k-core numbers on the undirected view.
+// Uses the linear-time Batagelj–Zaveršnik algorithm (O(V+E)).
+func computeKCore(adj undirectedAdjacency) map[int64]int {
+	n := len(adj.nodes)
+	if n == 0 {
+		return nil
 	}
 
-	core := make(map[int64]int, len(deg))
-	removed := make(map[int64]bool, len(deg))
+	// Use node IDs as direct indices. In this codebase, node IDs are densely
+	// allocated by gonum (0..n-1), so this provides fast array access.
+	// If IDs become sparse in the future, we can revisit this for a dense remap.
+	var maxID int64
+	for _, id := range adj.nodes {
+		if id > maxID {
+			maxID = id
+		}
+	}
+	size := int(maxID) + 1
+
+	deg := make([]int, size)
+	pos := make([]int, size)
+	present := make([]bool, size)
 
 	maxDeg := 0
-	for _, d := range deg {
+	for _, id := range adj.nodes {
+		present[id] = true
+		d := adj.degree(id)
+		deg[id] = d
 		if d > maxDeg {
 			maxDeg = d
 		}
 	}
 
-	for k := 1; k <= maxDeg; k++ {
-		queue := make([]int64, 0)
-		for id, d := range deg {
-			if !removed[id] && d < k {
-				queue = append(queue, id)
-			}
-		}
+	// Bin-sort vertices by degree.
+	bin := make([]int, maxDeg+1)
+	for _, id := range adj.nodes {
+		bin[deg[id]]++
+	}
 
-		for len(queue) > 0 {
-			v := queue[len(queue)-1]
-			queue = queue[:len(queue)-1]
-			if removed[v] {
+	start := 0
+	for d := 0; d <= maxDeg; d++ {
+		num := bin[d]
+		bin[d] = start
+		start += num
+	}
+
+	vert := make([]int64, n)
+	for _, id := range adj.nodes {
+		d := deg[id]
+		i := bin[d]
+		pos[id] = i
+		vert[i] = id
+		bin[d]++
+	}
+
+	// Restore bin[] to the start positions.
+	for d := maxDeg; d >= 1; d-- {
+		bin[d] = bin[d-1]
+	}
+	bin[0] = 0
+
+	// Core decomposition in-place. Final deg[v] is the core number.
+	for i := 0; i < n; i++ {
+		v := vert[i]
+		for _, u := range adj.neighborsOf(v) {
+			if !present[u] {
 				continue
 			}
-			removed[v] = true
-			// Highest core they failed to meet is k-1
-			core[v] = k - 1
-			for _, nbr := range adj[v] {
-				if removed[nbr] {
-					continue
+			if deg[u] > deg[v] {
+				du := deg[u]
+				pu := pos[u]
+				pw := bin[du]
+				w := vert[pw]
+				if u != w {
+					vert[pu] = w
+					vert[pw] = u
+					pos[u] = pw
+					pos[w] = pu
 				}
-				deg[nbr]--
-				if deg[nbr] < k {
-					queue = append(queue, nbr)
-				}
+				bin[du]++
+				deg[u]--
 			}
 		}
 	}
 
-	// Any nodes never removed get maxDeg
-	for id := range deg {
-		if !removed[id] {
-			core[id] = maxDeg
-		}
+	core := make(map[int64]int, n)
+	for _, id := range adj.nodes {
+		core[id] = deg[id]
 	}
 
 	return core
 }
 
 // findArticulationPoints runs Tarjan to find cut vertices in an undirected graph.
-func findArticulationPoints(g *simple.UndirectedGraph) map[int64]bool {
+func findArticulationPoints(adj undirectedAdjacency) map[int64]bool {
 	var timeIdx int
 	disc := make(map[int64]int)
 	low := make(map[int64]int)
@@ -1368,9 +1467,7 @@ func findArticulationPoints(g *simple.UndirectedGraph) map[int64]bool {
 		low[v] = timeIdx
 		childCount := 0
 
-		it := g.From(v)
-		for it.Next() {
-			u := it.Node().ID()
+		for _, u := range adj.neighborsOf(v) {
 			if disc[u] == 0 {
 				parent[u] = v
 				childCount++
@@ -1390,9 +1487,7 @@ func findArticulationPoints(g *simple.UndirectedGraph) map[int64]bool {
 		}
 	}
 
-	nodes := g.Nodes()
-	for nodes.Next() {
-		id := nodes.Node().ID()
+	for _, id := range adj.nodes {
 		if disc[id] == 0 {
 			parent[id] = noParent
 			dfs(id)

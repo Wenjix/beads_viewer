@@ -3416,6 +3416,21 @@ For comprehensive performance documentation including troubleshooting, size-base
 *   *Recommended:* [Nerd Fonts](https://www.nerdfonts.com/) (e.g., "JetBrains Mono Nerd Font" or "Hack Nerd Font").
 *   *Terminals:* Windows Terminal, iTerm2, Alacritty, Kitty, WezTerm.
 
+**Q: Live reload isn’t updating (especially on NFS/SMB/SSHFS/FUSE).**
+*   Some filesystems don’t reliably deliver filesystem events. `bv` will try to auto-detect this and switch to polling.
+*   If it still misbehaves, force polling:
+    ```bash
+    BV_FORCE_POLLING=1 bv
+    # or
+    BV_FORCE_POLL=1 bv
+    ```
+
+**Q: I see `polling …` in the footer. Is that bad?**
+No — it just means `bv` is using polling instead of filesystem events for live reload (common on remote filesystems). Polling can add a small delay before updates appear.
+
+**Q: I see `⚠ STALE` / `✗ bg …` / `⚠ worker unresponsive` / `↻ recovered` in the footer.**
+These indicators mean the background worker hasn’t produced a fresh snapshot recently (or needed to self-heal). Try `Ctrl+R`/`F5`, check filesystem permissions/health, or temporarily disable background mode (`BV_BACKGROUND_MODE=0`) to fall back to synchronous reload.
+
 **Q: I see "Cycles Detected" in the dashboard. What now?**
 A: A cycle (e.g., A → B → A) means your project logic is broken; no task can be finished first. Use the Insights Dashboard (`i`) to find the specific cycle members, then use `bd` to remove one of the dependency links (e.g., `bd unblock A --from B`).
 
@@ -3565,6 +3580,18 @@ bv has a comprehensive built-in help system:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `BEADS_DIR` | Custom beads directory path. When set, overrides the default `.beads` directory lookup. | `.beads` in cwd |
+| `BV_BACKGROUND_MODE` | Experimental: enable background snapshot loading for live reload in the TUI (`1`/`0`). | (disabled) |
+| `BV_FORCE_POLLING` | Force polling-based live reload (useful on NFS/SMB/SSHFS/FUSE or any setup where filesystem events are unreliable) (`1`/`0`). | (auto) |
+| `BV_FORCE_POLL` | Alias for `BV_FORCE_POLLING`. | (auto) |
+| `BV_DEBOUNCE_MS` | Debounce window (milliseconds) for live reload events in background mode. | `200` |
+| `BV_CHANNEL_BUFFER` | Background worker message buffer size (worker → UI). | `8` |
+| `BV_HEARTBEAT_INTERVAL_S` | Background worker heartbeat interval (seconds). | `5` |
+| `BV_WATCHDOG_INTERVAL_S` | Background worker watchdog interval (seconds). | `10` |
+| `BV_FRESHNESS_WARN_S` | Snapshot staleness warning threshold (seconds). | `30` |
+| `BV_FRESHNESS_STALE_S` | Snapshot staleness critical threshold (seconds). | `120` |
+| `BV_MAX_LINE_SIZE_MB` | Max JSONL line size in MB (lines larger than this are skipped with a warning). | `10` |
+| `BV_SKIP_PHASE2` | Skip Phase 2 graph metrics (centrality, cycles, critical path) (`1`/`0`). | (disabled) |
+| `BV_PHASE2_TIMEOUT_S` | Override per-metric Phase 2 timeouts (seconds). | (size-based) |
 | `BV_SEMANTIC_EMBEDDER` | Semantic embedding provider for `bv --search` and TUI semantic mode. | `hash` |
 | `BV_SEMANTIC_DIM` | Embedding dimension for semantic search index. | `384` |
 | `BV_SEMANTIC_MODEL` | Provider-specific model name for semantic search (optional). | (empty) |
@@ -3582,6 +3609,53 @@ BEADS_DIR=/path/to/shared/beads bv
 # Example: Use in monorepo
 export BEADS_DIR=$(git rev-parse --show-toplevel)/.beads
 ```
+
+### Experimental: Background Mode (Live Reload)
+
+The TUI can run live reload using an **experimental background snapshot worker** (moves file I/O + analysis off the UI thread).
+
+**Enable (opt-in):**
+```bash
+BV_BACKGROUND_MODE=1 bv
+bv --background-mode
+```
+
+**Disable / rollback:**
+```bash
+BV_BACKGROUND_MODE=0 bv
+bv --no-background-mode
+```
+
+**User config file (when neither CLI flags nor `BV_BACKGROUND_MODE` are set):**
+```yaml
+# ~/.config/bv/config.yaml
+experimental:
+  background_mode: true
+```
+
+**Precedence:** CLI flags → `BV_BACKGROUND_MODE` → `~/.config/bv/config.yaml`.
+
+**Migration plan (high level):**
+- Phase A (now): opt-in background mode, sync remains default.
+- Phase B: broaden rollout; keep explicit rollback (`--no-background-mode` / `BV_BACKGROUND_MODE=0`).
+- Phase C: flip default when stable; keep sync as fallback for a period.
+- Phase D: remove legacy sync reload path after deprecation window.
+
+**Monitoring plan:** no automatic telemetry today; rely on CI + regression tests and user reports during Phase A/B.
+
+### Status Indicators (Background Mode + Live Reload)
+
+When background mode or live reload is enabled, the footer may display these indicators:
+
+- `◌ metrics…` — Phase 2 metrics are still computing; the UI renders immediately with Phase 1 data.
+- `⚠ 45s ago` — snapshot age warning (data is getting stale).
+- `⚠ STALE: 3m ago` — snapshot is stale.
+- `✗ bg <phase> (3x)` — background worker hit repeated errors building snapshots (phase shown; retry count in parentheses).
+- `↻ recovered xN` — watchdog recovered the background worker N times (transient failures/self-healing).
+- `⚠ worker unresponsive` — watchdog detected the worker is stuck and is recovering.
+- `polling …` — live reload is using polling instead of filesystem events (common on remote filesystems); changes may appear with a small delay.
+
+Tip: `Ctrl+R` (or `F5`) forces a refresh.
 
 ### Visual Theme
 The UI uses a visually distinct, high-contrast theme inspired by Dracula Principles to ensure readability.

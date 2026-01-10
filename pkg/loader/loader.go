@@ -175,9 +175,31 @@ func LoadIssuesFromFileWithOptions(path string, opts ParseOptions) ([]model.Issu
 	return ParseIssuesWithOptions(file, opts)
 }
 
+// LoadIssuesFromFileWithOptionsPooled reads issues from a file with pooling enabled.
+// The caller must return pooled issues via ReturnIssuePtrsToPool when no longer needed.
+func LoadIssuesFromFileWithOptionsPooled(path string, opts ParseOptions) (PooledIssues, error) {
+	// Check if file exists
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return PooledIssues{}, fmt.Errorf("no beads issues found at %s", path)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return PooledIssues{}, fmt.Errorf("failed to open issues file: %w", err)
+	}
+	defer file.Close()
+
+	return ParseIssuesWithOptionsPooled(file, opts)
+}
+
 // LoadIssuesFromFile reads issues directly from a specific JSONL file path.
 func LoadIssuesFromFile(path string) ([]model.Issue, error) {
 	return LoadIssuesFromFileWithOptions(path, ParseOptions{})
+}
+
+// LoadIssuesFromFilePooled reads issues directly from a JSONL file path with pooling enabled.
+func LoadIssuesFromFilePooled(path string) (PooledIssues, error) {
+	return LoadIssuesFromFileWithOptionsPooled(path, ParseOptions{})
 }
 
 // ParseIssues parses JSONL content from a reader into issues.
@@ -188,7 +210,46 @@ func ParseIssues(r io.Reader) ([]model.Issue, error) {
 
 // ParseIssuesWithOptions parses JSONL content with custom options.
 func ParseIssuesWithOptions(r io.Reader, opts ParseOptions) ([]model.Issue, error) {
+	issues, _, err := parseIssuesWithOptions(r, opts, false)
+	return issues, err
+}
+
+// ParseIssuesWithOptionsPooled parses JSONL content with pooling enabled.
+// The caller must return pooled issues via ReturnIssuePtrsToPool when no longer needed.
+func ParseIssuesWithOptionsPooled(r io.Reader, opts ParseOptions) (PooledIssues, error) {
+	issues, poolRefs, err := parseIssuesWithOptions(r, opts, true)
+	if err != nil {
+		return PooledIssues{}, err
+	}
+	return PooledIssues{Issues: issues, PoolRefs: poolRefs}, nil
+}
+
+func parseIssuesWithOptions(r io.Reader, opts ParseOptions, usePool bool) ([]model.Issue, []*model.Issue, error) {
 	var issues []model.Issue
+	var poolRefs []*model.Issue
+	if f, ok := r.(*os.File); ok {
+		if info, err := f.Stat(); err == nil {
+			// Heuristic: average issue line ~2KB. Prefer conservative underestimation to
+			// avoid large over-allocations for big files.
+			const avgIssueBytes = 2 * 1024
+			const minCap = 64
+			const maxCap = 200_000
+
+			est := int(info.Size() / avgIssueBytes)
+			if est < minCap && info.Size() > 0 {
+				est = minCap
+			}
+			if est > maxCap {
+				est = maxCap
+			}
+			if est > 0 {
+				issues = make([]model.Issue, 0, est)
+				if usePool {
+					poolRefs = make([]*model.Issue, 0, est)
+				}
+			}
+		}
+	}
 
 	// Determine buffer size
 	maxCapacity := opts.BufferSize
@@ -221,7 +282,10 @@ func ParseIssuesWithOptions(r io.Reader, opts ParseOptions) ([]model.Issue, erro
 			if err == io.EOF {
 				break
 			}
-			return nil, fmt.Errorf("error reading issues stream at line %d: %w", lineNum, err)
+			if usePool {
+				ReturnIssuePtrsToPool(poolRefs)
+			}
+			return nil, nil, fmt.Errorf("error reading issues stream at line %d: %w", lineNum, err)
 		}
 
 		if isPrefix {
@@ -230,7 +294,10 @@ func ParseIssuesWithOptions(r io.Reader, opts ParseOptions) ([]model.Issue, erro
 			for isPrefix {
 				_, isPrefix, err = reader.ReadLine()
 				if err != nil && err != io.EOF {
-					return nil, fmt.Errorf("error skipping long line at line %d: %w", lineNum, err)
+					if usePool {
+						ReturnIssuePtrsToPool(poolRefs)
+					}
+					return nil, nil, fmt.Errorf("error skipping long line at line %d: %w", lineNum, err)
 				}
 				if err == io.EOF {
 					break
@@ -248,24 +315,45 @@ func ParseIssuesWithOptions(r io.Reader, opts ParseOptions) ([]model.Issue, erro
 			line = stripBOM(line)
 		}
 
-		var issue model.Issue
-		if err := json.Unmarshal(line, &issue); err != nil {
-			// Skip malformed lines but warn
-			warn(fmt.Sprintf("skipping malformed JSON on line %d: %v", lineNum, err))
-			continue
-		}
+		if usePool {
+			issue := GetIssue()
+			if err := json.Unmarshal(line, issue); err != nil {
+				PutIssue(issue)
+				// Skip malformed lines but warn
+				warn(fmt.Sprintf("skipping malformed JSON on line %d: %v", lineNum, err))
+				continue
+			}
 
-		// Validate issue
-		if err := issue.Validate(); err != nil {
-			// Skip invalid issues
-			warn(fmt.Sprintf("skipping invalid issue on line %d: %v", lineNum, err))
-			continue
-		}
+			// Validate issue
+			if err := issue.Validate(); err != nil {
+				PutIssue(issue)
+				// Skip invalid issues
+				warn(fmt.Sprintf("skipping invalid issue on line %d: %v", lineNum, err))
+				continue
+			}
 
-		issues = append(issues, issue)
+			issues = append(issues, *issue)
+			poolRefs = append(poolRefs, issue)
+		} else {
+			var issue model.Issue
+			if err := json.Unmarshal(line, &issue); err != nil {
+				// Skip malformed lines but warn
+				warn(fmt.Sprintf("skipping malformed JSON on line %d: %v", lineNum, err))
+				continue
+			}
+
+			// Validate issue
+			if err := issue.Validate(); err != nil {
+				// Skip invalid issues
+				warn(fmt.Sprintf("skipping invalid issue on line %d: %v", lineNum, err))
+				continue
+			}
+
+			issues = append(issues, issue)
+		}
 	}
 
-	return issues, nil
+	return issues, poolRefs, nil
 }
 
 // stripBOM removes the UTF-8 Byte Order Mark if present

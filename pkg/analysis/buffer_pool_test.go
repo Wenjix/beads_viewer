@@ -4,27 +4,19 @@ import (
 	"runtime"
 	"sync"
 	"testing"
-
-	"gonum.org/v1/gonum/graph"
 )
-
-// mockNode implements graph.Node for testing
-type mockNode struct {
-	id int64
-}
-
-func (n mockNode) ID() int64 { return n.id }
 
 // createTestBuffer creates a brandesBuffers with test data
 func createTestBuffer() *brandesBuffers {
 	return &brandesBuffers{
-		sigma:     make(map[int64]float64, 256),
-		dist:      make(map[int64]int, 256),
-		delta:     make(map[int64]float64, 256),
-		pred:      make(map[int64][]int64, 256),
-		queue:     make([]int64, 0, 256),
-		stack:     make([]int64, 0, 256),
-		neighbors: make([]int64, 0, 32),
+		sigma:     make([]float64, 0, 256),
+		dist:      make([]int, 0, 256),
+		delta:     make([]float64, 0, 256),
+		pred:      make([][]int, 0, 256),
+		queue:     make([]int, 0, 256),
+		stack:     make([]int, 0, 256),
+		neighbors: make([]int, 0, 32),
+		bc:        make([]float64, 0, 256),
 	}
 }
 
@@ -41,16 +33,19 @@ func TestBrandesBuffersInitialization(t *testing.T) {
 	t.Logf("Created buffer with queue capacity: %d", cap(buf.queue))
 
 	if buf.sigma == nil {
-		t.Fatal("sigma map should be initialized")
+		t.Fatal("sigma slice should be initialized")
 	}
 	if buf.dist == nil {
-		t.Fatal("dist map should be initialized")
+		t.Fatal("dist slice should be initialized")
 	}
 	if buf.delta == nil {
-		t.Fatal("delta map should be initialized")
+		t.Fatal("delta slice should be initialized")
 	}
 	if buf.pred == nil {
-		t.Fatal("pred map should be initialized")
+		t.Fatal("pred slice should be initialized")
+	}
+	if buf.bc == nil {
+		t.Fatal("bc slice should be initialized")
 	}
 	if cap(buf.queue) != 256 {
 		t.Errorf("queue capacity: got %d, want 256", cap(buf.queue))
@@ -75,21 +70,20 @@ func TestResetClearsAllValues(t *testing.T) {
 
 	// Create buffer with stale data
 	buf := createTestBuffer()
+	buf.reset(2)
 	buf.sigma[1] = 999.0
 	buf.dist[1] = 999
 	buf.delta[1] = 999.0
-	buf.pred[1] = []int64{1, 2, 3}
+	buf.bc[1] = 999.0
+	buf.pred[1] = append(buf.pred[1], 1, 2, 3)
 	buf.queue = append(buf.queue, 1, 2, 3)
-	buf.stack = append(buf.stack, 4, 5, 6)
+	buf.stack = append(buf.stack, 1, 0)
 
 	t.Logf("Before reset: sigma[1]=%v, dist[1]=%v, queue len=%d",
 		buf.sigma[1], buf.dist[1], len(buf.queue))
 
-	// Create mock nodes
-	nodes := []graph.Node{mockNode{id: 1}, mockNode{id: 2}}
-
 	// Reset
-	buf.reset(nodes)
+	buf.reset(2)
 
 	t.Logf("After reset: sigma[1]=%v, dist[1]=%v, queue len=%d",
 		buf.sigma[1], buf.dist[1], len(buf.queue))
@@ -103,6 +97,9 @@ func TestResetClearsAllValues(t *testing.T) {
 	}
 	if buf.delta[1] != 0.0 {
 		t.Errorf("delta[1] should be 0 after reset, got %v", buf.delta[1])
+	}
+	if buf.bc[1] != 0.0 {
+		t.Errorf("bc[1] should be 0 after reset, got %v", buf.bc[1])
 	}
 	if len(buf.pred[1]) != 0 {
 		t.Errorf("pred[1] should be empty after reset, got %v", buf.pred[1])
@@ -122,62 +119,63 @@ func TestResetRetainsPredCapacity(t *testing.T) {
 	t.Log("Testing reset() retains predecessor slice capacity...")
 
 	buf := createTestBuffer()
-	nodes := []graph.Node{mockNode{id: 1}}
 
 	// First reset - allocates small slice
-	buf.reset(nodes)
-	t.Logf("After first reset: pred[1] cap=%d", cap(buf.pred[1]))
+	buf.reset(1)
+	t.Logf("After first reset: pred[0] cap=%d", cap(buf.pred[0]))
 
 	// Add predecessors to grow slice
-	buf.pred[1] = append(buf.pred[1], 10, 20, 30, 40, 50)
-	oldCap := cap(buf.pred[1])
-	t.Logf("After appends: pred[1] cap=%d", oldCap)
+	buf.pred[0] = append(buf.pred[0], 10, 20, 30, 40, 50)
+	oldCap := cap(buf.pred[0])
+	t.Logf("After appends: pred[0] cap=%d", oldCap)
 
 	// Reset again - should retain capacity
-	buf.reset(nodes)
-	newCap := cap(buf.pred[1])
-	t.Logf("After second reset: pred[1] cap=%d", newCap)
+	buf.reset(1)
+	newCap := cap(buf.pred[0])
+	t.Logf("After second reset: pred[0] cap=%d", newCap)
 
 	if newCap < oldCap {
 		t.Errorf("pred capacity should be retained: got %d, want >= %d", newCap, oldCap)
 	}
-	if len(buf.pred[1]) != 0 {
-		t.Errorf("pred length should be 0 after reset, got %d", len(buf.pred[1]))
+	if len(buf.pred[0]) != 0 {
+		t.Errorf("pred length should be 0 after reset, got %d", len(buf.pred[0]))
 	}
 
 	t.Log("PASS: reset() retains predecessor slice capacity")
 }
 
-// TestResetTriggersClearOnOversizedMaps verifies 2x threshold
-func TestResetTriggersClearOnOversizedMaps(t *testing.T) {
-	t.Log("Testing reset() triggers clear() on oversized maps...")
+// TestResetTriggersResizeOnOversizedBuffers verifies the 2x threshold reallocation.
+func TestResetTriggersResizeOnOversizedBuffers(t *testing.T) {
+	t.Log("Testing reset() resizes oversized buffers...")
 
 	buf := createTestBuffer()
 
-	// Grow maps very large
-	for i := int64(0); i < 5000; i++ {
-		buf.sigma[i] = float64(i)
-		buf.dist[i] = int(i)
-		buf.delta[i] = float64(i)
-		buf.pred[i] = []int64{i}
-	}
-	t.Logf("Grew maps to %d entries", len(buf.sigma))
+	// Grow buffers very large
+	buf.reset(5000)
+	buf.sigma[4999] = 1
+	oldCap := cap(buf.sigma)
+	t.Logf("Grew buffers to len=%d cap=%d", len(buf.sigma), oldCap)
 
-	// Reset with tiny node set (should trigger clear due to 2x threshold)
-	nodes := []graph.Node{mockNode{id: 0}, mockNode{id: 1}}
-	buf.reset(nodes)
+	// Reset with tiny node set (should trigger resize due to 2x threshold)
+	buf.reset(2)
 
-	t.Logf("After reset with 2 nodes: sigma has %d entries", len(buf.sigma))
+	t.Logf("After reset with 2 nodes: sigma len=%d cap=%d", len(buf.sigma), cap(buf.sigma))
 
-	// Should have been cleared and only 2 entries remain
+	// Should have been resized and only 2 entries remain
 	if len(buf.sigma) != 2 {
-		t.Errorf("oversized map should be cleared: got %d entries, want 2", len(buf.sigma))
+		t.Errorf("oversized buffer should be resized: got %d entries, want 2", len(buf.sigma))
 	}
 	if len(buf.dist) != 2 {
-		t.Errorf("dist map should be cleared: got %d entries, want 2", len(buf.dist))
+		t.Errorf("dist buffer should be resized: got %d entries, want 2", len(buf.dist))
+	}
+	if cap(buf.sigma) >= oldCap {
+		t.Errorf("expected sigma capacity to shrink: got %d, want < %d", cap(buf.sigma), oldCap)
+	}
+	if buf.dist[0] != -1 || buf.dist[1] != -1 {
+		t.Errorf("dist entries should be -1 after reset, got %v", buf.dist)
 	}
 
-	t.Log("PASS: clear() triggered for oversized maps")
+	t.Log("PASS: resize triggered for oversized buffers")
 }
 
 // TestResetHandlesEmptyNodes verifies reset with empty node slice
@@ -185,10 +183,10 @@ func TestResetHandlesEmptyNodes(t *testing.T) {
 	t.Log("Testing reset() with empty node slice...")
 
 	buf := createTestBuffer()
+	buf.reset(2)
 	buf.sigma[1] = 999.0
 
-	nodes := []graph.Node{}
-	buf.reset(nodes)
+	buf.reset(0)
 
 	if len(buf.queue) != 0 {
 		t.Errorf("queue should be empty, got len %d", len(buf.queue))
@@ -234,9 +232,9 @@ func TestPoolPreallocation(t *testing.T) {
 		t.Fatal("Pool returned nil buffer")
 	}
 
-	// Verify all maps are initialized
-	if buf.sigma == nil || buf.dist == nil || buf.delta == nil || buf.pred == nil {
-		t.Error("One or more maps are nil")
+	// Verify all slices are initialized
+	if buf.sigma == nil || buf.dist == nil || buf.delta == nil || buf.pred == nil || buf.bc == nil {
+		t.Error("One or more slices are nil")
 	}
 
 	// Verify slices are at least usable (not nil)
@@ -260,6 +258,7 @@ func TestPoolEvictionRecovery(t *testing.T) {
 
 	// Get and return a buffer
 	buf1 := brandesPool.Get().(*brandesBuffers)
+	buf1.reset(100)
 	buf1.sigma[42] = 3.14
 	brandesPool.Put(buf1)
 
@@ -288,46 +287,39 @@ func TestPoolEvictionRecovery(t *testing.T) {
 func TestResetEquivalentToFreshAllocation(t *testing.T) {
 	t.Log("Testing that reset() produces state equivalent to fresh allocation...")
 
-	nodes := []graph.Node{mockNode{id: 1}, mockNode{id: 2}, mockNode{id: 3}}
+	nodeCount := 3
 
 	// Fresh allocation (baseline)
-	fresh := &brandesBuffers{
-		sigma: make(map[int64]float64),
-		dist:  make(map[int64]int),
-		delta: make(map[int64]float64),
-		pred:  make(map[int64][]int64),
-	}
-	for _, n := range nodes {
-		nid := n.ID()
-		fresh.sigma[nid] = 0
-		fresh.dist[nid] = -1
-		fresh.delta[nid] = 0
-		fresh.pred[nid] = make([]int64, 0)
-	}
+	fresh := &brandesBuffers{}
+	fresh.reset(nodeCount)
 
 	// Pooled + reset (optimized)
 	pooled := brandesPool.Get().(*brandesBuffers)
-	pooled.sigma[999] = 999.0 // Add stale data
-	pooled.dist[999] = 999
-	pooled.delta[999] = 999.0
-	pooled.reset(nodes)
+	pooled.reset(10)
+	pooled.sigma[9] = 999.0 // Add stale data
+	pooled.dist[9] = 999
+	pooled.delta[9] = 999.0
+	pooled.bc[9] = 999.0
+	pooled.reset(nodeCount)
 
 	// Compare
-	for _, n := range nodes {
-		nid := n.ID()
-		t.Logf("Node %d: fresh sigma=%v, pooled sigma=%v", nid, fresh.sigma[nid], pooled.sigma[nid])
+	for i := 0; i < nodeCount; i++ {
+		t.Logf("Index %d: fresh sigma=%v, pooled sigma=%v", i, fresh.sigma[i], pooled.sigma[i])
 
-		if fresh.sigma[nid] != pooled.sigma[nid] {
-			t.Errorf("sigma mismatch for node %d: fresh=%v, pooled=%v", nid, fresh.sigma[nid], pooled.sigma[nid])
+		if fresh.sigma[i] != pooled.sigma[i] {
+			t.Errorf("sigma mismatch for index %d: fresh=%v, pooled=%v", i, fresh.sigma[i], pooled.sigma[i])
 		}
-		if fresh.dist[nid] != pooled.dist[nid] {
-			t.Errorf("dist mismatch for node %d: fresh=%v, pooled=%v", nid, fresh.dist[nid], pooled.dist[nid])
+		if fresh.dist[i] != pooled.dist[i] {
+			t.Errorf("dist mismatch for index %d: fresh=%v, pooled=%v", i, fresh.dist[i], pooled.dist[i])
 		}
-		if fresh.delta[nid] != pooled.delta[nid] {
-			t.Errorf("delta mismatch for node %d: fresh=%v, pooled=%v", nid, fresh.delta[nid], pooled.delta[nid])
+		if fresh.delta[i] != pooled.delta[i] {
+			t.Errorf("delta mismatch for index %d: fresh=%v, pooled=%v", i, fresh.delta[i], pooled.delta[i])
 		}
-		if len(fresh.pred[nid]) != len(pooled.pred[nid]) {
-			t.Errorf("pred len mismatch for node %d: fresh=%d, pooled=%d", nid, len(fresh.pred[nid]), len(pooled.pred[nid]))
+		if fresh.bc[i] != pooled.bc[i] {
+			t.Errorf("bc mismatch for index %d: fresh=%v, pooled=%v", i, fresh.bc[i], pooled.bc[i])
+		}
+		if len(fresh.pred[i]) != len(pooled.pred[i]) {
+			t.Errorf("pred len mismatch for index %d: fresh=%d, pooled=%d", i, len(fresh.pred[i]), len(pooled.pred[i]))
 		}
 	}
 
@@ -342,37 +334,25 @@ func TestStaleEntriesNotAccessible(t *testing.T) {
 	buf := createTestBuffer()
 
 	// Simulate first usage with many nodes
-	oldNodes := make([]graph.Node, 100)
-	for i := range oldNodes {
-		oldNodes[i] = mockNode{id: int64(i)}
-	}
-	buf.reset(oldNodes)
-
-	// Add some values
-	for i := int64(0); i < 100; i++ {
-		buf.sigma[i] = float64(i * 10)
-		buf.dist[i] = int(i)
-	}
+	buf.reset(100)
+	buf.sigma[50] = 500
+	buf.dist[50] = 50
 	t.Logf("Set values for 100 nodes")
 
 	// Now reset with smaller set
-	newNodes := []graph.Node{mockNode{id: 5}, mockNode{id: 10}}
-	buf.reset(newNodes)
+	buf.reset(2)
 
-	// Only nodes 5 and 10 should have fresh values
-	if buf.sigma[5] != 0.0 {
-		t.Errorf("sigma[5] should be 0, got %v", buf.sigma[5])
+	if len(buf.sigma) != 2 {
+		t.Errorf("expected sigma len 2 after reset, got %d", len(buf.sigma))
 	}
-	if buf.dist[5] != -1 {
-		t.Errorf("dist[5] should be -1, got %v", buf.dist[5])
+	if buf.sigma[1] != 0.0 {
+		t.Errorf("sigma[1] should be 0, got %v", buf.sigma[1])
 	}
-	if buf.sigma[10] != 0.0 {
-		t.Errorf("sigma[10] should be 0, got %v", buf.sigma[10])
+	if buf.dist[1] != -1 {
+		t.Errorf("dist[1] should be -1, got %v", buf.dist[1])
 	}
 
-	// Note: stale entries for other nodes may still exist but won't be accessed
-	// by the algorithm since only nodes in the current graph are traversed
-	t.Log("PASS: Stale entries don't affect active node values")
+	t.Log("PASS: Stale entries beyond current length are not accessible")
 }
 
 // =============================================================================
@@ -384,11 +364,10 @@ func TestSliceCapacityRetention(t *testing.T) {
 	t.Log("Testing slice capacity retention across resets...")
 
 	buf := createTestBuffer()
-	nodes := []graph.Node{mockNode{id: 1}}
-	buf.reset(nodes)
+	buf.reset(1)
 
 	// Grow queue and stack
-	for i := int64(0); i < 500; i++ {
+	for i := 0; i < 500; i++ {
 		buf.queue = append(buf.queue, i)
 		buf.stack = append(buf.stack, i)
 	}
@@ -397,7 +376,7 @@ func TestSliceCapacityRetention(t *testing.T) {
 	t.Logf("Grew slices: queue cap=%d, stack cap=%d", queueCap, stackCap)
 
 	// Reset
-	buf.reset(nodes)
+	buf.reset(1)
 
 	// Capacity should be retained
 	if cap(buf.queue) < queueCap {
@@ -443,10 +422,9 @@ func TestBufferPoolConcurrentAccess(t *testing.T) {
 				}
 
 				// Simulate work
-				nodes := []graph.Node{mockNode{id: int64(workerID*1000 + j)}}
-				buf.reset(nodes)
-				buf.sigma[int64(workerID*1000+j)] = float64(j)
-				buf.queue = append(buf.queue, int64(j))
+				buf.reset(1)
+				buf.sigma[0] = float64(j)
+				buf.queue = append(buf.queue, j)
 
 				brandesPool.Put(buf)
 			}
@@ -469,6 +447,7 @@ func TestBufferPoolLifecycle(t *testing.T) {
 	}
 
 	// Modify it
+	buf1.reset(100)
 	buf1.sigma[42] = 1.5
 	buf1.queue = append(buf1.queue, 100)
 	t.Logf("Modified buffer: sigma[42]=%v, queue=%v", buf1.sigma[42], buf1.queue)

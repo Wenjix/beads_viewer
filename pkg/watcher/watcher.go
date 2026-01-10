@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,6 +68,8 @@ type Watcher struct {
 	onChange         func()
 	onError          func(error)
 	forcePoll        bool
+	forcePollEnv     bool
+	fsType           FilesystemType
 
 	fsWatcher   *fsnotify.Watcher
 	debouncer   *Debouncer
@@ -117,6 +120,25 @@ func (w *Watcher) Start() error {
 
 	w.ctx, w.cancel = context.WithCancel(context.Background())
 
+	// Reset per-start state.
+	w.useFallback = false
+	w.forcePollEnv = false
+	w.fsType = FSTypeUnknown
+
+	if envBool("BV_FORCE_POLLING") || envBool("BV_FORCE_POLL") {
+		w.forcePollEnv = true
+	}
+
+	w.fsType = DetectFilesystemType(w.path)
+	if isRemoteFilesystem(w.fsType) {
+		w.useFallback = true
+	}
+
+	forcePoll := w.forcePoll || w.forcePollEnv
+	if forcePoll {
+		w.useFallback = true
+	}
+
 	// Get initial file state
 	info, err := os.Stat(w.path)
 	if err != nil {
@@ -132,7 +154,7 @@ func (w *Watcher) Start() error {
 	}
 
 	// Try to use fsnotify
-	if !w.forcePoll {
+	if !forcePoll && !w.useFallback {
 		fsw, err := fsnotify.NewWatcher()
 		if err == nil {
 			// Watch the directory containing the file (more reliable for atomic writes)
@@ -211,6 +233,33 @@ func (w *Watcher) Changed() <-chan struct{} {
 // Path returns the watched file path.
 func (w *Watcher) Path() string {
 	return w.path
+}
+
+// FilesystemType returns the best-effort filesystem classification for the watched path.
+func (w *Watcher) FilesystemType() FilesystemType {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.fsType
+}
+
+// PollInterval returns the polling interval used when polling mode is active.
+func (w *Watcher) PollInterval() time.Duration {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.pollInterval
+}
+
+func envBool(name string) bool {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return false
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // watchFsnotify monitors using fsnotify events.

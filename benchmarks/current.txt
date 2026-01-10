@@ -61,4 +61,3 @@ BenchmarkFullAnalysis_Dense500-64                   	       2	 757890549 ns/op	6
 BenchmarkFullAnalysis_Dense500-64                   	       1	1840032855 ns/op	282107768 B/op	  888655 allocs/op
 BenchmarkFullAnalysis_Chain100-64                   	       7	 179020041 ns/op	270040704 B/op	  226825 allocs/op
 BenchmarkFullAnalysis_Chain100-64                   	      14	  87701947 ns/op	68230532 B/op	  223305 allocs/op
-BenchmarkFullAnalysis_Chain100-64                   	

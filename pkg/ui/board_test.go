@@ -55,6 +55,46 @@ func TestBoardModelBlackbox(t *testing.T) {
 	}
 }
 
+func TestBoardModel_SetSnapshot(t *testing.T) {
+	theme := createTheme()
+	issues := []model.Issue{
+		{ID: "open-1", Status: model.StatusOpen, Priority: 1, CreatedAt: createTime(0)},
+		{ID: "closed-1", Status: model.StatusClosed, Priority: 1, CreatedAt: createTime(0)},
+	}
+
+	snap := ui.NewSnapshotBuilder(issues).Build()
+	if snap == nil {
+		t.Fatal("expected non-nil snapshot")
+	}
+	if snap.BoardState == nil {
+		t.Fatal("expected snapshot.BoardState to be computed")
+	}
+
+	b := ui.NewBoardModel(nil, theme)
+	b.SetSnapshot(snap)
+
+	// Starts in Open column.
+	sel := b.SelectedIssue()
+	if sel == nil || sel.ID != "open-1" {
+		t.Fatalf("expected open-1 selected, got %#v", sel)
+	}
+
+	// In Status mode, navigation enters empty columns.
+	b.MoveRight() // In Progress (empty)
+	if sel := b.SelectedIssue(); sel != nil {
+		t.Fatalf("expected nil selection in empty column, got %#v", sel)
+	}
+	b.MoveRight() // Blocked (empty)
+	if sel := b.SelectedIssue(); sel != nil {
+		t.Fatalf("expected nil selection in empty column, got %#v", sel)
+	}
+	b.MoveRight() // Closed
+	sel = b.SelectedIssue()
+	if sel == nil || sel.ID != "closed-1" {
+		t.Fatalf("expected closed-1 selected, got %#v", sel)
+	}
+}
+
 // TestAdaptiveColumns verifies navigation behavior with empty columns
 // In Status mode, all 4 columns are shown (including empty), navigation can enter them
 // In Priority/Type modes, empty columns are hidden and navigation skips them (bv-tf6j)
@@ -455,24 +495,24 @@ func TestBoardAgeColorCoding(t *testing.T) {
 			Title:     "Recent Issue",
 			Status:    model.StatusOpen,
 			Priority:  2,
-			CreatedAt: createTime(12),         // 12 hours ago
-			UpdatedAt: time.Now(),              // just now - green
+			CreatedAt: createTime(12), // 12 hours ago
+			UpdatedAt: time.Now(),     // just now - green
 		},
 		{
 			ID:        "medium",
 			Title:     "Medium Age Issue",
 			Status:    model.StatusOpen,
 			Priority:  2,
-			CreatedAt: createTime(24 * 14),     // 14 days ago
-			UpdatedAt: createTime(24 * 10),     // 10 days ago - yellow
+			CreatedAt: createTime(24 * 14), // 14 days ago
+			UpdatedAt: createTime(24 * 10), // 10 days ago - yellow
 		},
 		{
 			ID:        "stale",
 			Title:     "Stale Issue",
 			Status:    model.StatusOpen,
 			Priority:  2,
-			CreatedAt: createTime(24 * 60),     // 60 days ago
-			UpdatedAt: createTime(24 * 45),     // 45 days ago - red
+			CreatedAt: createTime(24 * 60), // 60 days ago
+			UpdatedAt: createTime(24 * 45), // 45 days ago - red
 		},
 	}
 
@@ -1396,7 +1436,7 @@ func TestColumnStatsSwimLaneModeChange(t *testing.T) {
 func TestColumnStatsOldItemAge(t *testing.T) {
 	theme := createTheme()
 	issues := []model.Issue{
-		{ID: "new", Status: model.StatusOpen, Priority: 2, CreatedAt: createTime(1)},       // 1 hour old
+		{ID: "new", Status: model.StatusOpen, Priority: 2, CreatedAt: createTime(1)},          // 1 hour old
 		{ID: "medium", Status: model.StatusOpen, Priority: 2, CreatedAt: createTime(24 * 14)}, // 14 days old
 		{ID: "oldest", Status: model.StatusOpen, Priority: 2, CreatedAt: createTime(24 * 90)}, // 90 days old
 	}

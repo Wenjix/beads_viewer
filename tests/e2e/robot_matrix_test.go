@@ -1,10 +1,13 @@
 package main_test
 
 import (
+	"context"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRobotRecipesContract verifies --robot-recipes output structure.
@@ -406,7 +409,7 @@ func TestRobotTriageBlockersToClear(t *testing.T) {
 		DataHash string `json:"data_hash"`
 		Triage   struct {
 			BlockersToClear []struct {
-				ID           string `json:"id"`
+				ID            string `json:"id"`
 				UnblocksCount int    `json:"unblocks_count"`
 			} `json:"blockers_to_clear"`
 		} `json:"triage"`
@@ -430,5 +433,66 @@ func TestRobotTriageBlockersToClear(t *testing.T) {
 	if !found {
 		t.Fatalf("expected BLOCKER in blockers_to_clear with unblocks_count >= 2: %+v",
 			payload.Triage.BlockersToClear)
+	}
+}
+
+func TestRobotMode_IgnoresBackgroundModeFlagAndEnv(t *testing.T) {
+	bv := buildBvBinary(t)
+	env := t.TempDir()
+	writeBeads(t, env, `{"id":"A","title":"Alpha","status":"open","priority":1,"issue_type":"task"}`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Baseline.
+	baselineCmd := exec.CommandContext(ctx, bv, "--robot-triage")
+	baselineCmd.Dir = env
+	baselineOut, err := baselineCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("baseline --robot-triage failed: %v\n%s", err, baselineOut)
+	}
+	var baseline struct {
+		DataHash string `json:"data_hash"`
+	}
+	if err := json.Unmarshal(baselineOut, &baseline); err != nil {
+		t.Fatalf("baseline json decode: %v\nout=%s", err, baselineOut)
+	}
+	if baseline.DataHash == "" {
+		t.Fatalf("baseline missing data_hash")
+	}
+
+	// BV_BACKGROUND_MODE should not impact robot mode behavior/output.
+	envCmd := exec.CommandContext(ctx, bv, "--robot-triage")
+	envCmd.Dir = env
+	envCmd.Env = append(os.Environ(), "BV_BACKGROUND_MODE=1")
+	envOut, err := envCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("BV_BACKGROUND_MODE=1 --robot-triage failed: %v\n%s", err, envOut)
+	}
+	var envPayload struct {
+		DataHash string `json:"data_hash"`
+	}
+	if err := json.Unmarshal(envOut, &envPayload); err != nil {
+		t.Fatalf("env json decode: %v\nout=%s", err, envOut)
+	}
+	if envPayload.DataHash != baseline.DataHash {
+		t.Fatalf("data_hash changed with BV_BACKGROUND_MODE=1: %s vs %s", envPayload.DataHash, baseline.DataHash)
+	}
+
+	// --background-mode flag should be accepted but ignored for robot commands.
+	flagCmd := exec.CommandContext(ctx, bv, "--background-mode", "--robot-triage")
+	flagCmd.Dir = env
+	flagOut, err := flagCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("--background-mode --robot-triage failed: %v\n%s", err, flagOut)
+	}
+	var flagPayload struct {
+		DataHash string `json:"data_hash"`
+	}
+	if err := json.Unmarshal(flagOut, &flagPayload); err != nil {
+		t.Fatalf("flag json decode: %v\nout=%s", err, flagOut)
+	}
+	if flagPayload.DataHash != baseline.DataHash {
+		t.Fatalf("data_hash changed with --background-mode: %s vs %s", flagPayload.DataHash, baseline.DataHash)
 	}
 }

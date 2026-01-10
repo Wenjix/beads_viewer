@@ -24,6 +24,7 @@ type BoardModel struct {
 	// Swimlane grouping mode (bv-wjs0)
 	swimLaneMode SwimLaneMode
 	allIssues    []model.Issue // Store all issues for re-grouping on mode change
+	boardState   *BoardState   // Optional precomputed columns for all swimlane modes (bv-guxz)
 
 	// Reverse dependency index: maps issue ID -> slice of issue IDs it blocks (bv-1daf)
 	blocksIndex map[string][]string
@@ -144,7 +145,6 @@ func formatOldestAge(d time.Duration) string {
 	months := days / 30
 	return fmt.Sprintf("%dmo", months)
 }
-
 
 // sortIssuesByPriorityAndDate sorts issues by priority (ascending) then by creation date (descending)
 func sortIssuesByPriorityAndDate(issues []model.Issue) {
@@ -341,7 +341,11 @@ func (b *BoardModel) CycleSwimLaneMode() {
 
 // regroupIssues rebuilds columns based on current swimlane mode (bv-wjs0)
 func (b *BoardModel) regroupIssues() {
-	b.columns = groupIssuesByMode(b.allIssues, b.swimLaneMode)
+	if b.boardState != nil {
+		b.columns = b.boardState.ColumnsForMode(b.swimLaneMode)
+	} else {
+		b.columns = groupIssuesByMode(b.allIssues, b.swimLaneMode)
+	}
 
 	// Reset selection to avoid out-of-bounds
 	for i := 0; i < 4; i++ {
@@ -355,7 +359,7 @@ func (b *BoardModel) regroupIssues() {
 	}
 
 	b.updateActiveColumns()
-	b.CancelSearch() // Clear stale search matches
+	b.CancelSearch()    // Clear stale search matches
 	b.lastDetailID = "" // Force detail panel refresh
 }
 
@@ -411,6 +415,7 @@ func NewBoardModel(issues []model.Issue, theme Theme) BoardModel {
 func (b *BoardModel) SetIssues(issues []model.Issue) {
 	// Store all issues for regrouping on mode change (bv-wjs0)
 	b.allIssues = issues
+	b.boardState = nil
 
 	// Group by current swimlane mode (bv-wjs0)
 	b.columns = groupIssuesByMode(issues, b.swimLaneMode)
@@ -422,6 +427,53 @@ func (b *BoardModel) SetIssues(issues []model.Issue) {
 	for i := range issues {
 		b.issueMap[issues[i].ID] = &issues[i]
 	}
+
+	// Clear search state - stale matches could reference invalid positions (bv-yg39)
+	b.CancelSearch()
+
+	// Reset detail panel cache to force refresh if same issue is selected
+	b.lastDetailID = ""
+
+	// Sanitize selection to prevent out-of-bounds
+	for i := 0; i < 4; i++ {
+		if b.selectedRow[i] >= len(b.columns[i]) {
+			if len(b.columns[i]) > 0 {
+				b.selectedRow[i] = len(b.columns[i]) - 1
+			} else {
+				b.selectedRow[i] = 0
+			}
+		}
+	}
+
+	b.updateActiveColumns()
+}
+
+// SetSnapshot updates the board data directly from a DataSnapshot (bv-guxz).
+// This avoids UI-thread grouping/sorting work when the full dataset is shown.
+func (b *BoardModel) SetSnapshot(s *DataSnapshot) {
+	if s == nil {
+		b.SetIssues(nil)
+		return
+	}
+
+	b.allIssues = s.Issues
+	b.boardState = s.BoardState
+
+	if b.boardState != nil {
+		b.columns = b.boardState.ColumnsForMode(b.swimLaneMode)
+	} else {
+		b.columns = groupIssuesByMode(s.Issues, b.swimLaneMode)
+	}
+
+	// Prefer snapshot-precomputed reverse-dependency index when available.
+	if s.GraphLayout != nil && s.GraphLayout.Dependents != nil {
+		b.blocksIndex = s.GraphLayout.Dependents
+	} else {
+		b.blocksIndex = buildBlocksIndex(s.Issues)
+	}
+
+	// Use snapshot issue map for blocker titles.
+	b.issueMap = s.IssueMap
 
 	// Clear search state - stale matches could reference invalid positions (bv-yg39)
 	b.CancelSearch()
@@ -753,6 +805,35 @@ func (b *BoardModel) SelectedIssue() *model.Issue {
 		return &cols[row]
 	}
 	return nil
+}
+
+// SelectIssueByID attempts to focus and select the given issue ID on the board.
+// Returns true if the issue was found in the current board columns.
+func (b *BoardModel) SelectIssueByID(id string) bool {
+	if id == "" {
+		return false
+	}
+
+	// Search all columns; if found, set both focused column and selected row.
+	for col := 0; col < 4; col++ {
+		for row := range b.columns[col] {
+			if b.columns[col][row].ID != id {
+				continue
+			}
+
+			// Focus the matching column (focusedCol is an index into activeColIdx).
+			for i, colIdx := range b.activeColIdx {
+				if colIdx == col {
+					b.focusedCol = i
+					break
+				}
+			}
+			b.selectedRow[col] = row
+			return true
+		}
+	}
+
+	return false
 }
 
 // ColumnCount returns the number of issues in a column

@@ -12,30 +12,97 @@ import (
 	"gonum.org/v1/gonum/graph/simple"
 )
 
-// brandesBuffers holds reusable data structures for Brandes' algorithm.
-// These buffers are pooled via sync.Pool to avoid per-call allocations.
-//
-// Memory characteristics:
-//   - sigma: stores shortest path counts, O(V) entries
-//   - dist: stores BFS distances (-1 = unvisited), O(V) entries
-//   - delta: stores dependency accumulation, O(V) entries
-//   - pred: stores predecessor lists, O(V) entries + O(E) total slice capacity
-//   - queue: BFS frontier, up to O(V) capacity
-//   - stack: reverse order for accumulation, up to O(V) capacity
-//   - neighbors: temporary slice for iterator results, typically small
-type brandesBuffers struct {
-	sigma     map[int64]float64 // σ_s(v) = number of shortest paths from s through v
-	dist      map[int64]int     // d_s(v) = distance from source s to v (-1 = infinity)
-	delta     map[int64]float64 // δ_s(v) = dependency of s on v
-	pred      map[int64][]int64 // P_s(v) = predecessors of v on shortest paths from s
-	queue     []int64           // BFS queue (FIFO)
-	stack     []int64           // Visited nodes in BFS order (LIFO for backprop)
-	neighbors []int64           // Temp slice to collect neighbor IDs from iterator
+type denseIndex struct {
+	idToIdx map[int64]int
+	idxToID []int64
 }
 
-// brandesPool provides reusable buffer sets for singleSourceBetweenness.
+func buildDenseIndex(nodes []graph.Node) denseIndex {
+	idxToID := make([]int64, len(nodes))
+	idToIdx := denseIndexMapPool.Get().(map[int64]int)
+	clear(idToIdx)
+	for i, n := range nodes {
+		id := n.ID()
+		idxToID[i] = id
+		idToIdx[id] = i
+	}
+	return denseIndex{
+		idToIdx: idToIdx,
+		idxToID: idxToID,
+	}
+}
+
+type cachedAdjacency struct {
+	outgoing [][]int
+	incoming [][]int
+}
+
+func buildCachedAdjacency(g *simple.DirectedGraph, idx denseIndex) cachedAdjacency {
+	nodeCount := len(idx.idxToID)
+	outgoing := make([][]int, nodeCount)
+	incoming := make([][]int, nodeCount)
+
+	for vIdx, vID := range idx.idxToID {
+		to := g.From(vID)
+		capHint := to.Len()
+		if capHint < 0 {
+			capHint = 0
+		}
+		neighbors := make([]int, 0, capHint)
+		for to.Next() {
+			wID := to.Node().ID()
+			wIdx, ok := idx.idToIdx[wID]
+			if !ok {
+				continue
+			}
+			neighbors = append(neighbors, wIdx)
+		}
+		sort.Ints(neighbors)
+		outgoing[vIdx] = neighbors
+	}
+
+	// Build incoming adjacency from the already-built outgoing adjacency.
+	for vIdx, neighbors := range outgoing {
+		for _, wIdx := range neighbors {
+			incoming[wIdx] = append(incoming[wIdx], vIdx)
+		}
+	}
+	for i := range incoming {
+		sort.Ints(incoming[i])
+	}
+
+	return cachedAdjacency{
+		outgoing: outgoing,
+		incoming: incoming,
+	}
+}
+
+// brandesBuffers holds reusable data structures for Brandes' algorithm using dense indexing.
+// These buffers are pooled via sync.Pool to avoid per-call allocations.
+//
+// Memory characteristics (n = number of nodes):
+//   - sigma: stores shortest path counts, O(n)
+//   - dist: stores BFS distances (-1 = unvisited), O(n)
+//   - delta: stores dependency accumulation, O(n)
+//   - pred: stores predecessor lists as dense indices, O(n) slices + O(E) total capacity
+//   - queue: BFS frontier, up to O(n) capacity
+//   - stack: reverse order for accumulation, up to O(n) capacity
+//   - neighbors: temporary slice for iterator results, typically small
+//   - bc: per-source betweenness contributions, O(n)
+type brandesBuffers struct {
+	sigma     []float64 // σ_s(v)
+	dist      []int     // d_s(v) (-1 = infinity/unvisited)
+	delta     []float64 // δ_s(v)
+	pred      [][]int   // P_s(v) = predecessors as dense indices
+	queue     []int     // BFS queue (FIFO)
+	stack     []int     // Visited nodes in BFS order (LIFO for backprop)
+	neighbors []int     // Temp slice to collect neighbor indices from iterator
+	bc        []float64 // Per-source betweenness contributions
+}
+
+// brandesPool provides reusable buffer sets for singleSourceBetweennessDense.
 // Pre-allocation with capacity 256 handles most real-world graphs efficiently;
-// maps will grow if needed but retain capacity for subsequent reuse.
+// slices will grow if needed but retain capacity for subsequent reuse.
 //
 // Concurrency: sync.Pool is safe for concurrent Get/Put. Each goroutine
 // gets its own buffer; no synchronization needed during algorithm execution.
@@ -46,56 +113,100 @@ type brandesBuffers struct {
 var brandesPool = sync.Pool{
 	New: func() interface{} {
 		return &brandesBuffers{
-			sigma:     make(map[int64]float64, 256),
-			dist:      make(map[int64]int, 256),
-			delta:     make(map[int64]float64, 256),
-			pred:      make(map[int64][]int64, 256),
-			queue:     make([]int64, 0, 256),
-			stack:     make([]int64, 0, 256),
-			neighbors: make([]int64, 0, 32),
+			sigma:     make([]float64, 0, 256),
+			dist:      make([]int, 0, 256),
+			delta:     make([]float64, 0, 256),
+			pred:      make([][]int, 0, 256),
+			queue:     make([]int, 0, 256),
+			stack:     make([]int, 0, 256),
+			neighbors: make([]int, 0, 32),
+			bc:        make([]float64, 0, 256),
 		}
 	},
+}
+
+var approxNodesPool = sync.Pool{
+	New: func() interface{} {
+		return make([]graph.Node, 0, 256)
+	},
+}
+
+var denseIndexMapPool = sync.Pool{
+	New: func() interface{} {
+		return make(map[int64]int, 256)
+	},
+}
+
+func pooledNodesOf(it graph.Nodes) []graph.Node {
+	nodes := approxNodesPool.Get().([]graph.Node)
+	nodes = nodes[:0]
+	for it.Next() {
+		nodes = append(nodes, it.Node())
+	}
+	return nodes
+}
+
+func putPooledNodes(nodes []graph.Node) {
+	// Avoid retaining extremely large backing arrays in the pool.
+	const maxCap = 50_000
+	if cap(nodes) > maxCap {
+		return
+	}
+	approxNodesPool.Put(nodes[:0])
 }
 
 // reset clears buffer contents while retaining allocated capacity.
 // Must be called before each new source node BFS traversal.
 //
 // Memory strategy:
-//   - If maps grew >2x node count, use clear() to free excess entries
-//     while retaining underlying capacity (prevents unbounded growth)
-//   - For normal-sized maps, iterate and reset values in-place
+//   - If slices grew >2x node count, reallocate to allow GC of oversized backing arrays
 //   - Slices reset via [:0] to retain backing array
 //
 // Initialization values match fresh-allocation semantics:
-//   - sigma[nid] = 0 (no paths counted yet)
-//   - dist[nid] = -1 (infinity/unvisited sentinel)
-//   - delta[nid] = 0 (no dependency accumulated)
-//   - pred[nid] = pred[nid][:0] (empty predecessor list, retain slice capacity)
-func (b *brandesBuffers) reset(nodes []graph.Node) {
-	nodeCount := len(nodes)
-
-	// Clear maps if they've grown excessively (prevents unbounded memory)
-	// Threshold: 2x node count indicates significant graph size change
-	if len(b.sigma) > nodeCount*2 {
-		clear(b.sigma)
-		clear(b.dist)
-		clear(b.delta)
-		clear(b.pred)
+//   - sigma[i] = 0 (no paths counted yet)
+//   - dist[i] = -1 (infinity/unvisited sentinel)
+//   - delta[i] = 0 (no dependency accumulated)
+//   - pred[i] = pred[i][:0] (empty predecessor list, retain slice capacity)
+func (b *brandesBuffers) reset(nodeCount int) {
+	// Resize backing arrays when the graph size changes significantly:
+	// - Grow when capacity is insufficient
+	// - Shrink when previous capacity is >2x node count (avoid unbounded retention)
+	if cap(b.sigma) < nodeCount || cap(b.sigma) > nodeCount*2 {
+		b.sigma = make([]float64, 0, nodeCount)
+		b.dist = make([]int, 0, nodeCount)
+		b.delta = make([]float64, 0, nodeCount)
+		b.pred = make([][]int, 0, nodeCount)
+		b.queue = make([]int, 0, nodeCount)
+		b.stack = make([]int, 0, nodeCount)
+		b.bc = make([]float64, 0, nodeCount)
 	}
 
-	// Initialize all node entries
-	for _, n := range nodes {
-		nid := n.ID()
-		b.sigma[nid] = 0
-		b.dist[nid] = -1
-		b.delta[nid] = 0
-		// Reuse predecessor slice backing array, reset length to 0
-		if existing, ok := b.pred[nid]; ok {
-			b.pred[nid] = existing[:0]
-		} else {
-			// First time seeing this node - allocate small slice
-			b.pred[nid] = make([]int64, 0, 4)
+	b.sigma = b.sigma[:nodeCount]
+	clear(b.sigma)
+
+	b.dist = b.dist[:nodeCount]
+	for i := range b.dist {
+		b.dist[i] = -1
+	}
+
+	b.delta = b.delta[:nodeCount]
+	clear(b.delta)
+
+	b.bc = b.bc[:nodeCount]
+	clear(b.bc)
+
+	// Reset predecessor lists while retaining per-node slice capacity.
+	if cap(b.pred) < nodeCount {
+		b.pred = make([][]int, nodeCount)
+	} else {
+		b.pred = b.pred[:nodeCount]
+	}
+	for i := range b.pred {
+		if b.pred[i] != nil {
+			b.pred[i] = b.pred[i][:0]
+			continue
 		}
+		b.pred[i] = make([]int, 0, 4)
 	}
 
 	// Reset auxiliary slices (retain capacity)
@@ -159,7 +270,8 @@ type BetweennessResult struct {
 //   - "Approximating Betweenness Centrality" (Bader et al., 2007)
 func ApproxBetweenness(g *simple.DirectedGraph, sampleSize int, seed int64) BetweennessResult {
 	start := time.Now()
-	nodes := graph.NodesOf(g.Nodes())
+	nodes := pooledNodesOf(g.Nodes())
+	defer putPooledNodes(nodes)
 	n := len(nodes)
 	// Ensure deterministic ordering before sampling; gonum's Nodes may be map-backed.
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID() < nodes[j].ID() })
@@ -191,11 +303,19 @@ func ApproxBetweenness(g *simple.DirectedGraph, sampleSize int, seed int64) Betw
 		return result
 	}
 
-	// Sample k random pivot nodes
-	pivots := sampleNodes(nodes, sampleSize, seed)
+	idx := buildDenseIndex(nodes)
+	adj := buildCachedAdjacency(g, idx)
+	// idx.idToIdx is only needed for adjacency construction; return it to the pool early.
+	if idx.idToIdx != nil {
+		denseIndexMapPool.Put(idx.idToIdx)
+		idx.idToIdx = nil
+	}
+
+	// Sample k random pivot indices
+	pivots := sampleIndices(n, sampleSize, seed)
 
 	// Compute partial betweenness from sampled pivots in parallel
-	partialBC := make(map[int64]float64)
+	partialBC := make([]float64, n)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
@@ -204,19 +324,21 @@ func ApproxBetweenness(g *simple.DirectedGraph, sampleSize int, seed int64) Betw
 
 	for _, pivot := range pivots {
 		wg.Add(1)
-		go func(p graph.Node) {
+		go func(sourceIdx int) {
 			defer wg.Done()
 			sem <- struct{}{} // Acquire token
 			defer func() { <-sem }()
 
-			// Compute local contribution
-			localBC := make(map[int64]float64)
-			singleSourceBetweenness(g, p, localBC)
+			buf := brandesPool.Get().(*brandesBuffers)
+			defer brandesPool.Put(buf)
 
-			// Merge into global result
+			// Compute local contribution into pooled buffers (buf.bc)
+			singleSourceBetweennessDense(adj, sourceIdx, buf)
+
+			// Merge into global result using visited nodes only.
 			mu.Lock()
-			for id, val := range localBC {
-				partialBC[id] += val
+			for _, w := range buf.stack {
+				partialBC[w] += buf.bc[w]
 			}
 			mu.Unlock()
 		}(pivot)
@@ -226,25 +348,34 @@ func ApproxBetweenness(g *simple.DirectedGraph, sampleSize int, seed int64) Betw
 	// Scale up: BC_approx = BC_partial * (n / k)
 	// This extrapolates from the sample to the full graph
 	scale := float64(n) / float64(sampleSize)
-	for id := range partialBC {
-		partialBC[id] *= scale
+	scores := make(map[int64]float64, n)
+	for i, val := range partialBC {
+		if val == 0 {
+			continue
+		}
+		scores[idx.idxToID[i]] = val * scale
 	}
-
-	result.Scores = partialBC
+	result.Scores = scores
 	result.Elapsed = time.Since(start)
 	return result
 }
 
-// sampleNodes returns a random sample of k nodes from the input slice.
+// sampleIndices returns a random sample of k indices from [0,n).
 // Uses Fisher-Yates shuffle for unbiased sampling.
-func sampleNodes(nodes []graph.Node, k int, seed int64) []graph.Node {
-	if k >= len(nodes) {
-		return nodes
+func sampleIndices(n, k int, seed int64) []int {
+	if k >= n {
+		idxs := make([]int, n)
+		for i := range idxs {
+			idxs[i] = i
+		}
+		return idxs
 	}
 
 	// Create a copy to avoid modifying the original
-	shuffled := make([]graph.Node, len(nodes))
-	copy(shuffled, nodes)
+	shuffled := make([]int, n)
+	for i := range shuffled {
+		shuffled[i] = i
+	}
 
 	// Fisher-Yates shuffle for first k elements
 	rng := rand.New(rand.NewSource(seed))
@@ -256,21 +387,19 @@ func sampleNodes(nodes []graph.Node, k int, seed int64) []graph.Node {
 	return shuffled[:k]
 }
 
-// singleSourceBetweenness computes the betweenness contribution from a single source node.
-// This is the core of Brandes' algorithm, run once per pivot.
+// singleSourceBetweennessDense computes the betweenness contribution from a single source index.
+// This is the core of Brandes' algorithm, run once per pivot, using dense indexing.
 //
 // The algorithm performs BFS from the source and accumulates dependency scores
 // in a reverse topological order traversal.
-func singleSourceBetweenness(g *simple.DirectedGraph, source graph.Node, bc map[int64]float64) {
-	sourceID := source.ID()
-	nodes := graph.NodesOf(g.Nodes())
+func singleSourceBetweennessDense(adj cachedAdjacency, sourceIdx int, buf *brandesBuffers) {
+	nodeCount := len(adj.outgoing)
+	if nodeCount == 0 {
+		return
+	}
 
-	// Get buffer from pool - will be returned after this BFS completes
-	buf := brandesPool.Get().(*brandesBuffers)
-	defer brandesPool.Put(buf)
-
-	// Initialize buffer for this source (clears previous state while retaining capacity)
-	buf.reset(nodes)
+	// Initialize buffer for this source (clears previous state while retaining capacity).
+	buf.reset(nodeCount)
 
 	// Use pooled data structures (aliases for readability)
 	sigma := buf.sigma
@@ -278,11 +407,11 @@ func singleSourceBetweenness(g *simple.DirectedGraph, source graph.Node, bc map[
 	delta := buf.delta
 	pred := buf.pred
 
-	sigma[sourceID] = 1
-	dist[sourceID] = 0
+	sigma[sourceIdx] = 1
+	dist[sourceIdx] = 0
 
 	// Queue for BFS (reuse pooled slice)
-	buf.queue = append(buf.queue, sourceID)
+	buf.queue = append(buf.queue, sourceIdx)
 
 	// BFS phase
 	for len(buf.queue) > 0 {
@@ -290,16 +419,7 @@ func singleSourceBetweenness(g *simple.DirectedGraph, source graph.Node, bc map[
 		buf.queue = buf.queue[1:]
 		buf.stack = append(buf.stack, v)
 
-		// Collect neighbors into pooled slice to avoid iterator allocation
-		buf.neighbors = buf.neighbors[:0]
-		to := g.From(v) // Outgoing edges
-		for to.Next() {
-			buf.neighbors = append(buf.neighbors, to.Node().ID())
-		}
-		// Sort neighbors to ensure deterministic BFS and predecessor order
-		sort.Slice(buf.neighbors, func(i, j int) bool { return buf.neighbors[i] < buf.neighbors[j] })
-
-		for _, w := range buf.neighbors {
+		for _, w := range adj.outgoing[v] {
 			// Path discovery
 			if dist[w] < 0 {
 				dist[w] = dist[v] + 1
@@ -317,7 +437,7 @@ func singleSourceBetweenness(g *simple.DirectedGraph, source graph.Node, bc map[
 	// Accumulation phase
 	for i := len(buf.stack) - 1; i >= 0; i-- {
 		w := buf.stack[i]
-		if w == sourceID {
+		if w == sourceIdx {
 			continue
 		}
 
@@ -327,8 +447,8 @@ func singleSourceBetweenness(g *simple.DirectedGraph, source graph.Node, bc map[
 			}
 		}
 
-		// Add dependency to betweenness (w != sourceID already checked above)
-		bc[w] += delta[w]
+		// Add dependency to betweenness (w != sourceIdx already checked above)
+		buf.bc[w] += delta[w]
 	}
 }
 

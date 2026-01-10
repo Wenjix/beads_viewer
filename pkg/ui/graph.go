@@ -51,6 +51,66 @@ func NewGraphModel(issues []model.Issue, insights *analysis.Insights, theme Them
 	return g
 }
 
+// SetSnapshot updates the graph data from a pre-built DataSnapshot (bv-za8z).
+// This avoids rebuilding blockers/dependents and metric ranks on the UI thread.
+func (g *GraphModel) SetSnapshot(snapshot *DataSnapshot) {
+	if snapshot == nil {
+		return
+	}
+
+	// Capture current selection
+	var selectedID string
+	if len(g.sortedIDs) > 0 && g.selectedIdx >= 0 && g.selectedIdx < len(g.sortedIDs) {
+		selectedID = g.sortedIDs[g.selectedIdx]
+	}
+
+	g.issues = snapshot.Issues
+	g.issueMap = snapshot.IssueMap
+	g.insights = &snapshot.Insights
+
+	if g.issueMap == nil {
+		g.issueMap = make(map[string]*model.Issue, len(g.issues))
+		for i := range g.issues {
+			g.issueMap[g.issues[i].ID] = &g.issues[i]
+		}
+	}
+
+	if snapshot.GraphLayout != nil && len(snapshot.GraphLayout.SortedIDs) > 0 {
+		g.blockers = snapshot.GraphLayout.Blockers
+		g.dependents = snapshot.GraphLayout.Dependents
+		g.sortedIDs = snapshot.GraphLayout.SortedIDs
+
+		g.rankPageRank = snapshot.GraphLayout.RankPageRank
+		g.rankBetweenness = snapshot.GraphLayout.RankBetweenness
+		g.rankEigenvector = snapshot.GraphLayout.RankEigenvector
+		g.rankHubs = snapshot.GraphLayout.RankHubs
+		g.rankAuthorities = snapshot.GraphLayout.RankAuthorities
+		g.rankCriticalPath = snapshot.GraphLayout.RankCriticalPath
+		g.rankInDegree = snapshot.GraphLayout.RankInDegree
+		g.rankOutDegree = snapshot.GraphLayout.RankOutDegree
+	} else {
+		g.rebuildGraph()
+	}
+
+	// Restore selection
+	if selectedID != "" {
+		found := false
+		for i, id := range g.sortedIDs {
+			if id == selectedID {
+				g.selectedIdx = i
+				found = true
+				break
+			}
+		}
+		if !found && g.selectedIdx >= len(g.sortedIDs) {
+			g.selectedIdx = 0
+		}
+	}
+	if g.selectedIdx >= len(g.sortedIDs) {
+		g.selectedIdx = 0
+	}
+}
+
 // SetIssues updates the graph data preserving the selected issue if possible
 func (g *GraphModel) SetIssues(issues []model.Issue, insights *analysis.Insights) {
 	// Capture current selection
@@ -132,14 +192,14 @@ func (g *GraphModel) rebuildGraph() {
 
 // computeRankings precomputes rankings for all metrics
 func (g *GraphModel) computeRankings() {
-	g.rankPageRank = make(map[string]int)
-	g.rankBetweenness = make(map[string]int)
-	g.rankEigenvector = make(map[string]int)
-	g.rankHubs = make(map[string]int)
-	g.rankAuthorities = make(map[string]int)
-	g.rankCriticalPath = make(map[string]int)
-	g.rankInDegree = make(map[string]int)
-	g.rankOutDegree = make(map[string]int)
+	g.rankPageRank = nil
+	g.rankBetweenness = nil
+	g.rankEigenvector = nil
+	g.rankHubs = nil
+	g.rankAuthorities = nil
+	g.rankCriticalPath = nil
+	g.rankInDegree = nil
+	g.rankOutDegree = nil
 
 	if g.insights == nil || g.insights.Stats == nil {
 		return
@@ -147,60 +207,15 @@ func (g *GraphModel) computeRankings() {
 
 	stats := g.insights.Stats
 
-	// Helper to compute ranks from a float64 map (higher = better rank)
-	computeFloatRanks := func(m map[string]float64) map[string]int {
-		ranks := make(map[string]int)
-		type kv struct {
-			k string
-			v float64
-		}
-		var sorted []kv
-		for k, v := range m {
-			sorted = append(sorted, kv{k, v})
-		}
-		sort.Slice(sorted, func(i, j int) bool {
-			if sorted[i].v == sorted[j].v {
-				return sorted[i].k < sorted[j].k
-			}
-			return sorted[i].v > sorted[j].v // Descending
-		})
-		for i, item := range sorted {
-			ranks[item.k] = i + 1 // 1-indexed
-		}
-		return ranks
-	}
-
-	// Helper for int maps
-	computeIntRanks := func(m map[string]int) map[string]int {
-		ranks := make(map[string]int)
-		type kv struct {
-			k string
-			v int
-		}
-		var sorted []kv
-		for k, v := range m {
-			sorted = append(sorted, kv{k, v})
-		}
-		sort.Slice(sorted, func(i, j int) bool {
-			if sorted[i].v == sorted[j].v {
-				return sorted[i].k < sorted[j].k
-			}
-			return sorted[i].v > sorted[j].v
-		})
-		for i, item := range sorted {
-			ranks[item.k] = i + 1
-		}
-		return ranks
-	}
-
-	g.rankPageRank = computeFloatRanks(stats.PageRank())
-	g.rankBetweenness = computeFloatRanks(stats.Betweenness())
-	g.rankEigenvector = computeFloatRanks(stats.Eigenvector())
-	g.rankHubs = computeFloatRanks(stats.Hubs())
-	g.rankAuthorities = computeFloatRanks(stats.Authorities())
-	g.rankCriticalPath = computeFloatRanks(stats.CriticalPathScore())
-	g.rankInDegree = computeIntRanks(stats.InDegree)
-	g.rankOutDegree = computeIntRanks(stats.OutDegree)
+	// Reuse precomputed ranks from analysis (computed in Phase 1/2).
+	g.rankPageRank = stats.PageRankRank()
+	g.rankBetweenness = stats.BetweennessRank()
+	g.rankEigenvector = stats.EigenvectorRank()
+	g.rankHubs = stats.HubsRank()
+	g.rankAuthorities = stats.AuthoritiesRank()
+	g.rankCriticalPath = stats.CriticalPathRank()
+	g.rankInDegree = stats.InDegreeRank()
+	g.rankOutDegree = stats.OutDegreeRank()
 }
 
 // Navigation

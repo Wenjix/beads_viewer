@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -180,7 +181,7 @@ func TestViewTogglesGraphBoardInsightsActionable(t *testing.T) {
 		t.Fatalf("priority hints should toggle on with 'p'")
 	}
 
-	// Recipe picker toggle (' key, F5 also works)
+	// Recipe picker toggle (' key)
 	modelAny, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\''}})
 	m = modelAny.(Model)
 	if !m.showRecipePicker || m.focused != focusRecipePicker {
@@ -340,6 +341,9 @@ func TestRenderFooterStatusAndBadges(t *testing.T) {
 	if !strings.Contains(footer, "Saved") {
 		t.Fatalf("footer should include status message")
 	}
+	if !strings.Contains(footer, "✓") {
+		t.Fatalf("footer should include success icon")
+	}
 
 	// badges branch
 	m.statusMsg = ""
@@ -354,6 +358,122 @@ func TestRenderFooterStatusAndBadges(t *testing.T) {
 		if !strings.Contains(footer, expect) {
 			t.Fatalf("footer missing %s: %s", expect, footer)
 		}
+	}
+}
+
+func TestRenderFooter_FreshnessIndicatorLevels(t *testing.T) {
+	m := NewModel(nil, nil, "")
+	m.width = 140
+	m.currentFilter = "all"
+
+	m.backgroundWorker = &BackgroundWorker{}
+	m.snapshot = &DataSnapshot{CreatedAt: time.Now()}
+
+	// Fresh (<30s): no indicator
+	out := m.renderFooter()
+	if strings.Contains(out, "⚠") || strings.Contains(out, "STALE") || strings.Contains(out, "✗") {
+		t.Fatalf("expected no freshness indicator when fresh, got: %q", out)
+	}
+
+	// Warn (>=30s)
+	m.snapshot.CreatedAt = time.Now().Add(-45 * time.Second)
+	out = m.renderFooter()
+	if !strings.Contains(out, "⚠") || strings.Contains(out, "STALE") {
+		t.Fatalf("expected warning freshness indicator, got: %q", out)
+	}
+
+	// Stale (>=2m)
+	m.snapshot.CreatedAt = time.Now().Add(-3 * time.Minute)
+	out = m.renderFooter()
+	if !strings.Contains(out, "STALE") {
+		t.Fatalf("expected stale freshness indicator, got: %q", out)
+	}
+
+	// Error (>=3 consecutive errors)
+	m.backgroundWorker.lastError = &WorkerError{
+		Phase:   "load",
+		Time:    time.Now().Add(-5 * time.Second),
+		Retries: 3,
+	}
+	out = m.renderFooter()
+	if !strings.Contains(out, "✗") || !strings.Contains(out, "3x") {
+		t.Fatalf("expected error freshness indicator, got: %q", out)
+	}
+}
+
+func TestView_LoadingScreen_TransitionsOnFirstSnapshotOrError(t *testing.T) {
+	issues := []model.Issue{{
+		ID:        "L-1",
+		Title:     "Loading Test",
+		Status:    model.StatusOpen,
+		Priority:  1,
+		IssueType: model.TypeTask,
+		CreatedAt: time.Now(),
+	}}
+
+	m := NewModel(issues, nil, "")
+	m.width, m.height = 120, 30
+	m.backgroundWorker = &BackgroundWorker{state: WorkerProcessing}
+	m.snapshot = nil
+	m.snapshotInitPending = true
+
+	if out := m.View(); !strings.Contains(out, "Loading beads") {
+		t.Fatalf("expected loading screen before first snapshot, got: %q", out)
+	}
+
+	// Error should exit the loading screen (we already have initial data).
+	modelAny, _ := m.Update(SnapshotErrorMsg{Err: errors.New("boom"), Recoverable: true})
+	mErr := modelAny.(Model)
+	if out := mErr.View(); strings.Contains(out, "Loading beads") {
+		t.Fatalf("expected loading screen to clear on error, got: %q", out)
+	}
+
+	// Snapshot should exit the loading screen.
+	m.snapshotInitPending = true
+	snap := NewSnapshotBuilder(issues).Build()
+	modelAny, _ = m.Update(SnapshotReadyMsg{Snapshot: snap})
+	mOK := modelAny.(Model)
+	if out := mOK.View(); strings.Contains(out, "Loading beads") {
+		t.Fatalf("expected loading screen to clear on first snapshot, got: %q", out)
+	}
+}
+
+func TestRenderFooter_ShowsPhase2ProgressBadge(t *testing.T) {
+	m := NewModel(nil, nil, "")
+	m.width = 80
+	m.snapshot = &DataSnapshot{Phase2Ready: false}
+
+	out := m.renderFooter()
+	if !strings.Contains(out, "metrics") {
+		t.Fatalf("expected phase 2 progress badge, got: %q", out)
+	}
+}
+
+func TestRenderFooter_ShowsWorkerHealthIndicators(t *testing.T) {
+	m := NewModel(nil, nil, "")
+	m.width = 140
+	m.currentFilter = "all"
+	m.snapshot = &DataSnapshot{CreatedAt: time.Now()}
+
+	m.backgroundWorker = &BackgroundWorker{
+		started:          true,
+		heartbeatTimeout: time.Second,
+		lastHeartbeat:    time.Now().Add(-2 * time.Second),
+	}
+	out := m.renderFooter()
+	if !strings.Contains(out, "unresponsive") {
+		t.Fatalf("expected worker unresponsive indicator, got: %q", out)
+	}
+
+	m.backgroundWorker = &BackgroundWorker{
+		started:          true,
+		heartbeatTimeout: time.Second,
+		lastHeartbeat:    time.Now(),
+		recoveryCount:    2,
+	}
+	out = m.renderFooter()
+	if !strings.Contains(out, "recovered x2") {
+		t.Fatalf("expected worker recovered indicator, got: %q", out)
 	}
 }
 
@@ -484,6 +604,53 @@ func TestRenderFooterErrorStatus(t *testing.T) {
 	out := m.renderFooter()
 	if !strings.Contains(out, "boom") {
 		t.Fatalf("footer should show error status")
+	}
+	if !strings.Contains(out, "✗") {
+		t.Fatalf("footer should show error icon")
+	}
+}
+
+func TestRenderFooter_CombinedIndicators(t *testing.T) {
+	tmp := t.TempDir()
+	f := filepath.Join(tmp, "beads.jsonl")
+	if err := os.WriteFile(f, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	w, err := watcher.NewWatcher(
+		f,
+		watcher.WithForcePoll(true),
+		watcher.WithPollInterval(10*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("watcher: %v", err)
+	}
+	if err := w.Start(); err != nil {
+		t.Fatalf("watcher start: %v", err)
+	}
+	t.Cleanup(func() { w.Stop() })
+
+	m := NewModel(nil, nil, "")
+	m.width = 160
+	m.currentFilter = "ready"
+	m.countOpen, m.countReady, m.countBlocked, m.countClosed = 1, 2, 3, 4
+	m.updateAvailable = true
+	m.updateTag = "v9.9.9"
+	m.snapshot = &DataSnapshot{CreatedAt: time.Now(), Phase2Ready: false}
+	m.backgroundWorker = &BackgroundWorker{
+		started:          true,
+		state:            WorkerIdle,
+		lastHeartbeat:    time.Now(),
+		heartbeatTimeout: 5 * time.Second,
+		recoveryCount:    2,
+		watcher:          w,
+	}
+
+	out := m.renderFooter()
+	for _, expect := range []string{"READY", "metrics", "recovered x2", "polling", "⭐"} {
+		if !strings.Contains(out, expect) {
+			t.Fatalf("footer missing %q: %q", expect, out)
+		}
 	}
 }
 

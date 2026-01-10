@@ -204,6 +204,78 @@ func NewTreeModel(theme Theme) TreeModel {
 	}
 }
 
+// buildIssueTreeNodes constructs the hierarchical parent/child tree and returns:
+// - roots: root nodes (sorted)
+// - nodeMap: issue ID -> tree node
+//
+// This does NOT load persisted expand/collapse state or build the visible flat list.
+// Those remain view concerns handled by TreeModel (so user state can change without
+// requiring a snapshot rebuild).
+func buildIssueTreeNodes(issues []model.Issue) ([]*IssueTreeNode, map[string]*IssueTreeNode) {
+	t := TreeModel{
+		issueMap: make(map[string]*IssueTreeNode),
+	}
+	if len(issues) == 0 {
+		return nil, t.issueMap
+	}
+
+	// Step 1: Build parent→children index and track which issues have parents
+	childrenOf := make(map[string][]*model.Issue)
+	hasParent := make(map[string]bool)
+	issueByID := make(map[string]*model.Issue)
+
+	for i := range issues {
+		issue := &issues[i]
+		issueByID[issue.ID] = issue
+
+		for _, dep := range issue.Dependencies {
+			if dep != nil && dep.Type == model.DepParentChild {
+				parentID := dep.DependsOnID
+				childrenOf[parentID] = append(childrenOf[parentID], issue)
+				hasParent[issue.ID] = true
+			}
+		}
+	}
+
+	// Step 2: Identify root nodes (issues with no parent OR whose parent doesn't exist)
+	var rootIssues []*model.Issue
+	for i := range issues {
+		issue := &issues[i]
+		if !hasParent[issue.ID] {
+			rootIssues = append(rootIssues, issue)
+			continue
+		}
+
+		// Issue declares a parent - verify at least one referenced parent exists
+		hasValidParent := false
+		for _, dep := range issue.Dependencies {
+			if dep != nil && dep.Type == model.DepParentChild {
+				if _, exists := issueByID[dep.DependsOnID]; exists {
+					hasValidParent = true
+					break
+				}
+			}
+		}
+		if !hasValidParent {
+			rootIssues = append(rootIssues, issue)
+		}
+	}
+
+	// Step 3: Build tree recursively with cycle detection
+	visited := make(map[string]bool)
+	for _, issue := range rootIssues {
+		node := t.buildNode(issue, 0, childrenOf, nil, visited)
+		if node != nil {
+			t.roots = append(t.roots, node)
+		}
+	}
+
+	// Step 4: Sort roots by priority, type, then created date
+	t.sortNodes(t.roots)
+
+	return t.roots, t.issueMap
+}
+
 // SetSize updates the available dimensions for the tree view
 func (t *TreeModel) SetSize(width, height int) {
 	t.width = width
@@ -226,66 +298,10 @@ func (t *TreeModel) Build(issues []model.Issue) {
 		return
 	}
 
-	// Step 1: Build parent→children index and track which issues have parents
-	// childrenOf maps parentID → slice of child issues
-	childrenOf := make(map[string][]*model.Issue)
-	// hasParent tracks which issues have a parent-child dependency
-	hasParent := make(map[string]bool)
-	// issueByID for quick lookup
-	issueByID := make(map[string]*model.Issue)
-
-	for i := range issues {
-		issue := &issues[i]
-		issueByID[issue.ID] = issue
-
-		for _, dep := range issue.Dependencies {
-			if dep != nil && dep.Type == model.DepParentChild {
-				// This issue has dep.DependsOnID as its parent
-				parentID := dep.DependsOnID
-				childrenOf[parentID] = append(childrenOf[parentID], issue)
-				hasParent[issue.ID] = true
-			}
-		}
-	}
-
-	// Step 2: Identify root nodes (issues with no parent OR whose parent doesn't exist)
-	// This handles dangling references - if a parent is referenced but doesn't exist,
-	// the child becomes a root rather than disappearing from the tree entirely.
-	var rootIssues []*model.Issue
-	for i := range issues {
-		issue := &issues[i]
-		if !hasParent[issue.ID] {
-			// This issue has no parent - it's a root
-			rootIssues = append(rootIssues, issue)
-		} else {
-			// Issue declares a parent - verify the parent exists
-			hasValidParent := false
-			for _, dep := range issue.Dependencies {
-				if dep != nil && dep.Type == model.DepParentChild {
-					if _, exists := issueByID[dep.DependsOnID]; exists {
-						hasValidParent = true
-						break
-					}
-				}
-			}
-			if !hasValidParent {
-				// Parent doesn't exist in our issue set - treat as root
-				rootIssues = append(rootIssues, issue)
-			}
-		}
-	}
-
-	// Step 3: Build tree recursively with cycle detection
-	visited := make(map[string]bool)
-	for _, issue := range rootIssues {
-		node := t.buildNode(issue, 0, childrenOf, nil, visited)
-		if node != nil {
-			t.roots = append(t.roots, node)
-		}
-	}
-
-	// Step 4: Sort roots by priority, type, then created date
-	t.sortNodes(t.roots)
+	// Build tree structure (no state) and then apply persisted expand/collapse state.
+	roots, nodeMap := buildIssueTreeNodes(issues)
+	t.roots = roots
+	t.issueMap = nodeMap
 
 	// Step 5: Handle empty tree (no parent-child relationships found)
 	// If all issues are roots (no hierarchy), that's fine - show them all
@@ -300,6 +316,54 @@ func (t *TreeModel) Build(issues []model.Issue) {
 	t.rebuildFlatList()
 
 	t.built = true
+}
+
+// BuildFromSnapshot wires the tree view to precomputed tree data from a DataSnapshot.
+// This avoids building the parent/child structure on the UI thread when the snapshot
+// already contains it (bv-t435).
+func (t *TreeModel) BuildFromSnapshot(snapshot *DataSnapshot) {
+	if snapshot == nil {
+		return
+	}
+
+	// Skip work if we're already built for this snapshot.
+	if t.built && snapshot.DataHash != "" && t.lastHash == snapshot.DataHash {
+		return
+	}
+
+	// Preserve current selection (best-effort) by issue ID.
+	prevSelectedID := ""
+	if issue := t.SelectedIssue(); issue != nil {
+		prevSelectedID = issue.ID
+	}
+
+	// Reset view state, but keep dimensions/theme/beadsDir.
+	t.roots = snapshot.TreeRoots
+	t.issueMap = snapshot.TreeNodeMap
+
+	// If the snapshot didn't include tree data, fall back to building it now.
+	if len(t.roots) == 0 || t.issueMap == nil {
+		t.Build(snapshot.Issues)
+		t.lastHash = snapshot.DataHash
+		return
+	}
+
+	// Apply persisted expand/collapse state and rebuild visible list.
+	t.loadState()
+	t.rebuildFlatList()
+	t.built = true
+	t.lastHash = snapshot.DataHash
+
+	// Restore selection if possible.
+	if prevSelectedID != "" {
+		for i, node := range t.flatList {
+			if node != nil && node.Issue != nil && node.Issue.ID == prevSelectedID {
+				t.cursor = i
+				t.ensureCursorVisible()
+				break
+			}
+		}
+	}
 }
 
 // buildNode recursively builds a tree node and its children.

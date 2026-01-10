@@ -4,13 +4,26 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
+)
+
+const (
+	robotAnalysisDiskCacheVersion      = 1
+	robotAnalysisDiskCacheFileName     = "analysis_cache.json"
+	robotAnalysisDiskCacheDirName      = "bv"
+	robotAnalysisDiskCacheMaxEntries   = 10
+	robotAnalysisDiskCacheMaxAge       = 24 * time.Hour
+	robotAnalysisDiskCacheMaxEntrySize = 10 << 20 // 10MB
 )
 
 // Cache holds cached analysis results keyed by data hash.
@@ -315,4 +328,298 @@ func (ca *CachedAnalyzer) DataHash() string {
 // WasCacheHit returns true if the last AnalyzeAsync call was a cache hit.
 func (ca *CachedAnalyzer) WasCacheHit() bool {
 	return ca.cacheHit
+}
+
+type robotAnalysisDiskCacheFile struct {
+	Version int                                    `json:"version"`
+	Entries map[string]robotAnalysisDiskCacheEntry `json:"entries"`
+}
+
+type robotAnalysisDiskCacheEntry struct {
+	CreatedAt  time.Time           `json:"created_at"`
+	AccessedAt time.Time           `json:"accessed_at"`
+	DataHash   string              `json:"data_hash"`
+	ConfigHash string              `json:"config_hash"`
+	Result     graphStatsCacheBlob `json:"result"`
+}
+
+type graphStatsCacheBlob struct {
+	OutDegree        map[string]int `json:"out_degree"`
+	InDegree         map[string]int `json:"in_degree"`
+	TopologicalOrder []string       `json:"topological_order"`
+	Density          float64        `json:"density"`
+	NodeCount        int            `json:"node_count"`
+	EdgeCount        int            `json:"edge_count"`
+	Config           AnalysisConfig `json:"config"`
+
+	PageRank          map[string]float64 `json:"page_rank"`
+	Betweenness       map[string]float64 `json:"betweenness"`
+	Eigenvector       map[string]float64 `json:"eigenvector"`
+	Hubs              map[string]float64 `json:"hubs"`
+	Authorities       map[string]float64 `json:"authorities"`
+	CriticalPathScore map[string]float64 `json:"critical_path_score"`
+	CoreNumber        map[string]int     `json:"core_number"`
+	Articulation      []string           `json:"articulation"`
+	Slack             map[string]float64 `json:"slack"`
+	Cycles            [][]string         `json:"cycles"`
+	Status            MetricStatus       `json:"status"`
+}
+
+func (b graphStatsCacheBlob) toGraphStats() *GraphStats {
+	stats := &GraphStats{
+		OutDegree:        b.OutDegree,
+		InDegree:         b.InDegree,
+		TopologicalOrder: b.TopologicalOrder,
+		Density:          b.Density,
+		NodeCount:        b.NodeCount,
+		EdgeCount:        b.EdgeCount,
+		Config:           b.Config,
+
+		phase2Ready: true,
+		phase2Done:  make(chan struct{}),
+
+		pageRank:          b.PageRank,
+		betweenness:       b.Betweenness,
+		eigenvector:       b.Eigenvector,
+		hubs:              b.Hubs,
+		authorities:       b.Authorities,
+		criticalPathScore: b.CriticalPathScore,
+		coreNumber:        b.CoreNumber,
+		slack:             b.Slack,
+		cycles:            b.Cycles,
+		status:            b.Status,
+	}
+
+	if len(b.Articulation) > 0 {
+		art := make(map[string]bool, len(b.Articulation))
+		for _, id := range b.Articulation {
+			art[id] = true
+		}
+		stats.articulation = art
+	}
+
+	// Rank maps are derived for UI optimization, so recompute rather than persist.
+	stats.inDegreeRank = computeIntRanks(stats.InDegree)
+	stats.outDegreeRank = computeIntRanks(stats.OutDegree)
+	stats.pageRankRank = computeFloatRanks(stats.pageRank)
+	stats.betweennessRank = computeFloatRanks(stats.betweenness)
+	stats.eigenvectorRank = computeFloatRanks(stats.eigenvector)
+	stats.hubsRank = computeFloatRanks(stats.hubs)
+	stats.authoritiesRank = computeFloatRanks(stats.authorities)
+	stats.criticalPathRank = computeFloatRanks(stats.criticalPathScore)
+
+	close(stats.phase2Done)
+	return stats
+}
+
+func robotDiskCacheEnabled() bool {
+	return os.Getenv("BV_ROBOT") == "1"
+}
+
+func robotAnalysisDiskCachePath(create bool) (string, error) {
+	base := os.Getenv("BV_CACHE_DIR")
+	if base == "" {
+		dir, err := os.UserCacheDir()
+		if err != nil {
+			return "", fmt.Errorf("getting user cache dir: %w", err)
+		}
+		base = filepath.Join(dir, robotAnalysisDiskCacheDirName)
+	}
+	if create {
+		if err := os.MkdirAll(base, 0o755); err != nil {
+			return "", fmt.Errorf("creating cache dir: %w", err)
+		}
+	}
+	return filepath.Join(base, robotAnalysisDiskCacheFileName), nil
+}
+
+func readRobotDiskCacheLocked(f *os.File) robotAnalysisDiskCacheFile {
+	if _, err := f.Seek(0, 0); err != nil {
+		return robotAnalysisDiskCacheFile{Version: robotAnalysisDiskCacheVersion, Entries: map[string]robotAnalysisDiskCacheEntry{}}
+	}
+	data, err := io.ReadAll(f)
+	if err != nil || len(data) == 0 {
+		return robotAnalysisDiskCacheFile{Version: robotAnalysisDiskCacheVersion, Entries: map[string]robotAnalysisDiskCacheEntry{}}
+	}
+
+	var cf robotAnalysisDiskCacheFile
+	if err := json.Unmarshal(data, &cf); err != nil || cf.Version != robotAnalysisDiskCacheVersion {
+		return robotAnalysisDiskCacheFile{Version: robotAnalysisDiskCacheVersion, Entries: map[string]robotAnalysisDiskCacheEntry{}}
+	}
+	if cf.Entries == nil {
+		cf.Entries = map[string]robotAnalysisDiskCacheEntry{}
+	}
+	return cf
+}
+
+func writeRobotDiskCacheLocked(f *os.File, cf robotAnalysisDiskCacheFile) error {
+	if cf.Entries == nil {
+		cf.Entries = map[string]robotAnalysisDiskCacheEntry{}
+	}
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		return err
+	}
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(cf); err != nil {
+		return err
+	}
+	return f.Sync()
+}
+
+func pruneRobotDiskCacheEntries(now time.Time, entries map[string]robotAnalysisDiskCacheEntry) {
+	for k, e := range entries {
+		if e.CreatedAt.IsZero() || now.Sub(e.CreatedAt) > robotAnalysisDiskCacheMaxAge {
+			delete(entries, k)
+		}
+	}
+}
+
+func evictRobotDiskCacheLRU(entries map[string]robotAnalysisDiskCacheEntry) {
+	if len(entries) <= robotAnalysisDiskCacheMaxEntries {
+		return
+	}
+	type item struct {
+		key string
+		t   time.Time
+	}
+	items := make([]item, 0, len(entries))
+	for k, e := range entries {
+		t := e.AccessedAt
+		if t.IsZero() {
+			t = e.CreatedAt
+		}
+		items = append(items, item{key: k, t: t})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].t.Equal(items[j].t) {
+			return items[i].key < items[j].key
+		}
+		return items[i].t.Before(items[j].t)
+	})
+	for len(entries) > robotAnalysisDiskCacheMaxEntries && len(items) > 0 {
+		delete(entries, items[0].key)
+		items = items[1:]
+	}
+}
+
+func getRobotDiskCachedStats(fullKey string) (*GraphStats, bool) {
+	if !robotDiskCacheEnabled() {
+		return nil, false
+	}
+
+	path, err := robotAnalysisDiskCachePath(false)
+	if err != nil {
+		return nil, false
+	}
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+
+	if err := lockFile(f); err != nil {
+		return nil, false
+	}
+	defer func() { _ = unlockFile(f) }()
+
+	now := time.Now()
+	cf := readRobotDiskCacheLocked(f)
+	pruneRobotDiskCacheEntries(now, cf.Entries)
+
+	entry, ok := cf.Entries[fullKey]
+	if !ok {
+		// Best-effort: persist prunes.
+		_ = writeRobotDiskCacheLocked(f, cf)
+		return nil, false
+	}
+
+	entry.AccessedAt = now.UTC()
+	cf.Entries[fullKey] = entry
+	evictRobotDiskCacheLRU(cf.Entries)
+	_ = writeRobotDiskCacheLocked(f, cf)
+
+	return entry.Result.toGraphStats(), true
+}
+
+func putRobotDiskCachedStats(fullKey, dataHash, configHash string, stats *GraphStats) {
+	if !robotDiskCacheEnabled() {
+		return
+	}
+	if stats == nil || !stats.IsPhase2Ready() {
+		return
+	}
+
+	stats.mu.RLock()
+	blob := graphStatsCacheBlob{
+		OutDegree:        stats.OutDegree,
+		InDegree:         stats.InDegree,
+		TopologicalOrder: stats.TopologicalOrder,
+		Density:          stats.Density,
+		NodeCount:        stats.NodeCount,
+		EdgeCount:        stats.EdgeCount,
+		Config:           stats.Config,
+
+		PageRank:          stats.pageRank,
+		Betweenness:       stats.betweenness,
+		Eigenvector:       stats.eigenvector,
+		Hubs:              stats.hubs,
+		Authorities:       stats.authorities,
+		CriticalPathScore: stats.criticalPathScore,
+		CoreNumber:        stats.coreNumber,
+		Slack:             stats.slack,
+		Cycles:            stats.cycles,
+		Status:            stats.status,
+	}
+	if stats.articulation != nil {
+		blob.Articulation = make([]string, 0, len(stats.articulation))
+		for id := range stats.articulation {
+			blob.Articulation = append(blob.Articulation, id)
+		}
+		sort.Strings(blob.Articulation)
+	}
+	stats.mu.RUnlock()
+
+	if b, err := json.Marshal(blob); err != nil || len(b) > robotAnalysisDiskCacheMaxEntrySize {
+		return
+	}
+
+	path, err := robotAnalysisDiskCachePath(true)
+	if err != nil {
+		return
+	}
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	if err := lockFile(f); err != nil {
+		return
+	}
+	defer func() { _ = unlockFile(f) }()
+
+	now := time.Now().UTC()
+	cf := readRobotDiskCacheLocked(f)
+	pruneRobotDiskCacheEntries(now, cf.Entries)
+
+	if cf.Entries == nil {
+		cf.Entries = map[string]robotAnalysisDiskCacheEntry{}
+	}
+
+	cf.Entries[fullKey] = robotAnalysisDiskCacheEntry{
+		CreatedAt:  now,
+		AccessedAt: now,
+		DataHash:   dataHash,
+		ConfigHash: configHash,
+		Result:     blob,
+	}
+
+	evictRobotDiskCacheLRU(cf.Entries)
+	_ = writeRobotDiskCacheLocked(f, cf)
 }

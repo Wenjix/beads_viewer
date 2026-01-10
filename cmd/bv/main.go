@@ -5,19 +5,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/term"
+	"gopkg.in/yaml.v3"
 
 	"github.com/Dicklesworthstone/beads_viewer/pkg/analysis"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/baseline"
@@ -181,6 +185,9 @@ func main() {
 	debugRender := flag.String("debug-render", "", "Render a view and output to file (views: insights, board)")
 	debugWidth := flag.Int("debug-width", 180, "Width for debug render")
 	debugHeight := flag.Int("debug-height", 50, "Height for debug render")
+	// Experimental background snapshot worker (bv-o11l)
+	backgroundMode := flag.Bool("background-mode", false, "Enable experimental background snapshot loading (TUI only)")
+	noBackgroundMode := flag.Bool("no-background-mode", false, "Disable experimental background snapshot loading (TUI only)")
 	flag.Parse()
 
 	// Ensure static export flags are retained even when build tags strip features in some environments.
@@ -4227,31 +4234,17 @@ func main() {
 	if *asOf != "" {
 		if len(issues) == 0 {
 			fmt.Printf("No issues found at %s.\n", *asOf)
-			os.Exit(0)
+			return
 		}
 
 		// Launch TUI with historical issues (already loaded, no live reload)
 		m := ui.NewModel(issues, activeRecipe, "")
-		p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-
-		// Optional auto-quit for automated tests: set BV_TUI_AUTOCLOSE_MS
-		if v := os.Getenv("BV_TUI_AUTOCLOSE_MS"); v != "" {
-			if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
-				go func() {
-					delay := time.Duration(ms) * time.Millisecond
-					time.Sleep(delay)
-					p.Send(tea.Quit)
-					// Failsafe: hard exit soon after to avoid hanging tests
-					time.Sleep(2 * time.Second)
-					os.Exit(0)
-				}()
-			}
-		}
-		if _, err := p.Run(); err != nil {
+		defer m.Stop()
+		if err := runTUIProgram(m); err != nil {
 			fmt.Printf("Error running beads viewer: %v\n", err)
 			os.Exit(1)
 		}
-		os.Exit(0)
+		return
 	}
 
 	if *exportFile != "" {
@@ -4315,6 +4308,27 @@ func main() {
 		issues = applyRecipeSort(issues, activeRecipe)
 	}
 
+	// Background mode rollout (bv-o11l):
+	// - CLI flags override env var
+	// - env var overrides user config file
+	if *backgroundMode && *noBackgroundMode {
+		fmt.Fprintln(os.Stderr, "Error: --background-mode and --no-background-mode are mutually exclusive")
+		os.Exit(2)
+	}
+	if *backgroundMode {
+		_ = os.Setenv("BV_BACKGROUND_MODE", "1")
+	} else if *noBackgroundMode {
+		_ = os.Setenv("BV_BACKGROUND_MODE", "0")
+	} else if v, ok := os.LookupEnv("BV_BACKGROUND_MODE"); ok && strings.TrimSpace(v) != "" {
+		// Respect explicit user env var.
+	} else if enabled, ok := loadBackgroundModeFromUserConfig(); ok {
+		if enabled {
+			_ = os.Setenv("BV_BACKGROUND_MODE", "1")
+		} else {
+			_ = os.Setenv("BV_BACKGROUND_MODE", "0")
+		}
+	}
+
 	// Initial Model with live reload support
 	m := ui.NewModel(issues, activeRecipe, beadsPath)
 	defer m.Stop() // Clean up file watcher
@@ -4338,25 +4352,79 @@ func main() {
 	}
 
 	// Run Program
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-
-	// Optional auto-quit for automated tests: set BV_TUI_AUTOCLOSE_MS
-	if v := os.Getenv("BV_TUI_AUTOCLOSE_MS"); v != "" {
-		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
-			go func() {
-				delay := time.Duration(ms) * time.Millisecond
-				time.Sleep(delay)
-				p.Send(tea.Quit)
-				// Failsafe: hard exit soon after to avoid hanging tests
-				time.Sleep(2 * time.Second)
-				os.Exit(0)
-			}()
-		}
-	}
-	if _, err := p.Run(); err != nil {
+	if err := runTUIProgram(m); err != nil {
 		fmt.Printf("Error running beads viewer: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runTUIProgram(m ui.Model) error {
+	p := tea.NewProgram(
+		m,
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+		tea.WithoutSignalHandler(),
+	)
+
+	runDone := make(chan struct{})
+	defer close(runDone)
+
+	// Graceful shutdown on SIGINT/SIGTERM (bv-bzt8).
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		select {
+		case <-runDone:
+			return
+		case <-sigCh:
+		}
+
+		p.Quit()
+
+		select {
+		case <-runDone:
+			return
+		case <-sigCh:
+		case <-time.After(5 * time.Second):
+		}
+
+		p.Kill()
+	}()
+
+	// Optional auto-quit for automated tests: set BV_TUI_AUTOCLOSE_MS.
+	if v := os.Getenv("BV_TUI_AUTOCLOSE_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			go func() {
+				timer := time.NewTimer(time.Duration(ms) * time.Millisecond)
+				defer timer.Stop()
+
+				select {
+				case <-runDone:
+					return
+				case <-timer.C:
+				}
+
+				p.Quit()
+
+				select {
+				case <-runDone:
+					return
+				case <-time.After(2 * time.Second):
+				}
+
+				p.Kill()
+			}()
+		}
+	}
+
+	_, err := p.Run()
+	if err != nil && errors.Is(err, tea.ErrProgramKilled) {
+		if err == tea.ErrProgramKilled || errors.Is(err, tea.ErrInterrupted) {
+			return nil
+		}
+	}
+	return err
 }
 
 // countEdges counts blocking dependencies for config sizing
@@ -4370,6 +4438,32 @@ func countEdges(issues []model.Issue) int {
 		}
 	}
 	return count
+}
+
+func loadBackgroundModeFromUserConfig() (bool, bool) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil || homeDir == "" {
+		return false, false
+	}
+	configPath := filepath.Join(homeDir, ".config", "bv", "config.yaml")
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false, false
+	}
+
+	var cfg struct {
+		Experimental struct {
+			BackgroundMode *bool `yaml:"background_mode"`
+		} `yaml:"experimental"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return false, false
+	}
+	if cfg.Experimental.BackgroundMode == nil {
+		return false, false
+	}
+	return *cfg.Experimental.BackgroundMode, true
 }
 
 // printDiffSummary prints a human-readable diff summary

@@ -4,10 +4,12 @@ package ui
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/Dicklesworthstone/beads_viewer/pkg/analysis"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
+	"github.com/Dicklesworthstone/beads_viewer/pkg/recipe"
 )
 
 // DataSnapshot is an immutable, self-contained representation of all data
@@ -18,12 +20,19 @@ import (
 // When a new snapshot is ready, the UI swaps the pointer atomically.
 type DataSnapshot struct {
 	// Core data
-	Issues   []model.Issue          // All issues (sorted)
+	Issues   []model.Issue           // All issues (sorted)
 	IssueMap map[string]*model.Issue // Lookup by ID
+	// pooledIssues holds pooled backing structs used during parse.
+	// It must be returned to the pool when the snapshot is replaced.
+	pooledIssues []*model.Issue
+	// ViewIssues are the issues included in the current view context (e.g. recipe).
+	// When empty, callers should fall back to Issues.
+	ViewIssues []model.Issue
 
 	// Graph analysis
-	Analyzer  *analysis.Analyzer
-	Analysis  *analysis.GraphStats
+	Analyzer *analysis.Analyzer
+	Analysis *analysis.GraphStats
+	Insights analysis.Insights
 
 	// Computed statistics
 	CountOpen    int
@@ -39,10 +48,25 @@ type DataSnapshot struct {
 	QuickWinSet   map[string]bool
 	BlockerSet    map[string]bool
 	UnblocksMap   map[string][]string
+	// TreeRoots and TreeNodeMap contain a pre-built parent/child tree for the Tree view.
+	// These are computed off-thread by SnapshotBuilder to avoid UI-thread work when
+	// entering the tree view for large datasets.
+	TreeRoots   []*IssueTreeNode
+	TreeNodeMap map[string]*IssueTreeNode
+	// BoardState contains pre-built Kanban board columns for each swimlane mode (bv-guxz).
+	BoardState *BoardState
+	// GraphLayout contains pre-built graph view data (blockers/dependents, sorted IDs, ranks)
+	// to avoid rebuilding graph structures on the UI thread (bv-za8z).
+	GraphLayout *GraphLayout
 
 	// Metadata
-	CreatedAt time.Time // When this snapshot was built
-	DataHash  string    // Hash of source data for cache validation
+	CreatedAt  time.Time // When this snapshot was built
+	DataHash   string    // Hash of source data for cache validation
+	RecipeName string    // Active recipe name for this snapshot (bv-2h40)
+	RecipeHash string    // Fingerprint of active recipe for this snapshot (bv-4ilb)
+	// LoadWarningCount is the number of non-fatal parse warnings encountered while loading.
+	// In TUI mode, warnings must not be printed to stderr during render.
+	LoadWarningCount int
 
 	// Phase 2 analysis status
 	// Phase2Ready is true when expensive metrics (PageRank, Betweenness, etc.) are computed
@@ -55,12 +79,74 @@ type DataSnapshot struct {
 	StaleWarning bool      // True if data is from previous successful load
 }
 
+// GraphLayout contains precomputed data used by the graph view.
+// This intentionally focuses on the current ASCII graph view needs (relationships + ranks),
+// not geometric coordinates.
+type GraphLayout struct {
+	// Relationships (blocks/dependents)
+	Blockers   map[string][]string // What each issue depends on (blocks this issue)
+	Dependents map[string][]string // What depends on each issue (this issue blocks)
+
+	// Navigation order (all IDs in the snapshot)
+	SortedIDs []string
+
+	// Metric ranks (1 = best, higher = worse). Missing ranks imply "unknown".
+	RankPageRank     map[string]int
+	RankBetweenness  map[string]int
+	RankEigenvector  map[string]int
+	RankHubs         map[string]int
+	RankAuthorities  map[string]int
+	RankCriticalPath map[string]int
+	RankInDegree     map[string]int
+	RankOutDegree    map[string]int
+}
+
+// BoardState contains precomputed Kanban columns for each swimlane mode.
+// This lets the UI swap board data in O(1) when the full dataset is shown.
+type BoardState struct {
+	ByStatus   [4][]model.Issue
+	ByPriority [4][]model.Issue
+	ByType     [4][]model.Issue
+}
+
+func (s *BoardState) ColumnsForMode(mode SwimLaneMode) [4][]model.Issue {
+	if s == nil {
+		return [4][]model.Issue{}
+	}
+	switch mode {
+	case SwimByPriority:
+		return s.ByPriority
+	case SwimByType:
+		return s.ByType
+	default:
+		return s.ByStatus
+	}
+}
+
+func (l *GraphLayout) UpdatePhase2Ranks(stats *analysis.GraphStats) {
+	if l == nil || stats == nil {
+		return
+	}
+
+	// Phase 2 ranks may become available later (AnalyzeAsync).
+	l.RankPageRank = stats.PageRankRank()
+	l.RankBetweenness = stats.BetweennessRank()
+	l.RankEigenvector = stats.EigenvectorRank()
+	l.RankHubs = stats.HubsRank()
+	l.RankAuthorities = stats.AuthoritiesRank()
+	l.RankCriticalPath = stats.CriticalPathRank()
+
+	// Rebuild SortedIDs using the new critical-path ranking, preserving determinism.
+	l.SortedIDs = orderIssueIDsByRank(l.SortedIDs, l.RankCriticalPath)
+}
+
 // SnapshotBuilder constructs DataSnapshots from raw data.
 // This is used by the BackgroundWorker to build new snapshots.
 type SnapshotBuilder struct {
 	issues   []model.Issue
 	analyzer *analysis.Analyzer
 	analysis *analysis.GraphStats
+	recipe   *recipe.Recipe
 }
 
 // NewSnapshotBuilder creates a builder for constructing a DataSnapshot.
@@ -77,12 +163,31 @@ func (b *SnapshotBuilder) WithAnalysis(a *analysis.GraphStats) *SnapshotBuilder 
 	return b
 }
 
+func (b *SnapshotBuilder) WithRecipe(r *recipe.Recipe) *SnapshotBuilder {
+	b.recipe = r
+	return b
+}
+
 // Build constructs the final immutable DataSnapshot.
 // This performs all necessary computations that should happen in the background.
 // Uses AnalyzeAsync() so Phase 2 metrics compute in background - check Phase2Ready
 // or call GetGraphStats().WaitForPhase2() if you need Phase 2 data immediately.
 func (b *SnapshotBuilder) Build() *DataSnapshot {
 	issues := b.issues
+
+	// Apply default sorting to match the legacy reload path:
+	// Open first, then priority (ascending), then created date (newest first).
+	sort.Slice(issues, func(i, j int) bool {
+		iClosed := issues[i].Status == model.StatusClosed
+		jClosed := issues[j].Status == model.StatusClosed
+		if iClosed != jClosed {
+			return !iClosed
+		}
+		if issues[i].Priority != issues[j].Priority {
+			return issues[i].Priority < issues[j].Priority
+		}
+		return issues[i].CreatedAt.After(issues[j].CreatedAt)
+	})
 
 	// Compute analysis if not provided
 	// Use AnalyzeAsync to allow Phase 2 to run in background
@@ -128,14 +233,25 @@ func (b *SnapshotBuilder) Build() *DataSnapshot {
 		}
 	}
 
-	// Build list items with graph scores
-	listItems := make([]IssueItem, len(issues))
-	for i := range issues {
+	viewIssues := issues
+	if b.recipe != nil {
+		viewIssues = make([]model.Issue, 0, len(issues))
+		for i := range issues {
+			if issueMatchesRecipe(issues[i], issueMap, b.recipe) {
+				viewIssues = append(viewIssues, issues[i])
+			}
+		}
+		sortIssuesByRecipe(viewIssues, graphStats, b.recipe)
+	}
+
+	// Build list items with graph scores (respecting recipe filtering/sorting when present).
+	listItems := make([]IssueItem, len(viewIssues))
+	for i := range viewIssues {
 		listItems[i] = IssueItem{
-			Issue:      issues[i],
-			GraphScore: graphStats.GetPageRankScore(issues[i].ID),
-			Impact:     graphStats.GetCriticalPathScore(issues[i].ID),
-			RepoPrefix: ExtractRepoPrefix(issues[i].ID),
+			Issue:      viewIssues[i],
+			GraphScore: graphStats.GetPageRankScore(viewIssues[i].ID),
+			Impact:     graphStats.GetCriticalPathScore(viewIssues[i].ID),
+			RepoPrefix: ExtractRepoPrefix(viewIssues[i].ID),
 		}
 	}
 
@@ -178,11 +294,18 @@ func (b *SnapshotBuilder) Build() *DataSnapshot {
 		listItems[i].UnblocksCount = len(unblocksMap[id])
 	}
 
+	treeRoots, treeNodeMap := buildIssueTreeNodes(issues)
+	boardState := buildBoardState(issues)
+	insights := graphStats.GenerateInsights(len(issues))
+	graphLayout := buildGraphLayout(issues, graphStats)
+
 	return &DataSnapshot{
 		Issues:        issues,
 		IssueMap:      issueMap,
+		ViewIssues:    viewIssues,
 		Analyzer:      b.analyzer,
 		Analysis:      graphStats,
+		Insights:      insights,
 		CountOpen:     cOpen,
 		CountReady:    cReady,
 		CountBlocked:  cBlocked,
@@ -193,9 +316,260 @@ func (b *SnapshotBuilder) Build() *DataSnapshot {
 		QuickWinSet:   quickWinSet,
 		BlockerSet:    blockerSet,
 		UnblocksMap:   unblocksMap,
+		TreeRoots:     treeRoots,
+		TreeNodeMap:   treeNodeMap,
+		BoardState:    boardState,
+		GraphLayout:   graphLayout,
 		CreatedAt:     time.Now(),
 		Phase2Ready:   graphStats.IsPhase2Ready(),
 	}
+}
+
+func issueMatchesRecipe(issue model.Issue, issueMap map[string]*model.Issue, r *recipe.Recipe) bool {
+	if r == nil {
+		return true
+	}
+
+	// Status filter
+	if len(r.Filters.Status) > 0 {
+		statusMatch := false
+		for _, s := range r.Filters.Status {
+			if string(issue.Status) == s {
+				statusMatch = true
+				break
+			}
+		}
+		if !statusMatch {
+			return false
+		}
+	}
+
+	// Priority filter
+	if len(r.Filters.Priority) > 0 {
+		prioMatch := false
+		for _, p := range r.Filters.Priority {
+			if issue.Priority == p {
+				prioMatch = true
+				break
+			}
+		}
+		if !prioMatch {
+			return false
+		}
+	}
+
+	// Tags filter (must have ALL specified tags)
+	if len(r.Filters.Tags) > 0 {
+		for _, required := range r.Filters.Tags {
+			found := false
+			for _, label := range issue.Labels {
+				if label == required {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+	}
+
+	// Actionable filter (true = no open blockers)
+	if r.Filters.Actionable != nil && *r.Filters.Actionable {
+		for _, dep := range issue.Dependencies {
+			if dep == nil || dep.Type != model.DepBlocks {
+				continue
+			}
+			if blocker, exists := issueMap[dep.DependsOnID]; exists && blocker.Status != model.StatusClosed {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func sortIssuesByRecipe(issues []model.Issue, stats *analysis.GraphStats, r *recipe.Recipe) {
+	if r == nil || r.Sort.Field == "" {
+		return
+	}
+
+	desc := r.Sort.Direction == "desc"
+	field := r.Sort.Field
+
+	sort.Slice(issues, func(i, j int) bool {
+		ii := issues[i]
+		jj := issues[j]
+
+		var cmp int
+		switch field {
+		case "priority":
+			switch {
+			case ii.Priority < jj.Priority:
+				cmp = -1
+			case ii.Priority > jj.Priority:
+				cmp = 1
+			}
+		case "created", "created_at":
+			switch {
+			case ii.CreatedAt.Before(jj.CreatedAt):
+				cmp = -1
+			case ii.CreatedAt.After(jj.CreatedAt):
+				cmp = 1
+			}
+		case "updated", "updated_at":
+			switch {
+			case ii.UpdatedAt.Before(jj.UpdatedAt):
+				cmp = -1
+			case ii.UpdatedAt.After(jj.UpdatedAt):
+				cmp = 1
+			}
+		case "impact":
+			if stats == nil {
+				switch {
+				case ii.Priority < jj.Priority:
+					cmp = -1
+				case ii.Priority > jj.Priority:
+					cmp = 1
+				}
+				break
+			}
+			iScore := stats.GetCriticalPathScore(ii.ID)
+			jScore := stats.GetCriticalPathScore(jj.ID)
+			switch {
+			case iScore < jScore:
+				cmp = -1
+			case iScore > jScore:
+				cmp = 1
+			}
+		case "pagerank":
+			if stats == nil {
+				switch {
+				case ii.Priority < jj.Priority:
+					cmp = -1
+				case ii.Priority > jj.Priority:
+					cmp = 1
+				}
+				break
+			}
+			iScore := stats.GetPageRankScore(ii.ID)
+			jScore := stats.GetPageRankScore(jj.ID)
+			switch {
+			case iScore < jScore:
+				cmp = -1
+			case iScore > jScore:
+				cmp = 1
+			}
+		default:
+			switch {
+			case ii.Priority < jj.Priority:
+				cmp = -1
+			case ii.Priority > jj.Priority:
+				cmp = 1
+			}
+		}
+
+		// Tie-breaker for determinism.
+		if cmp == 0 {
+			return ii.ID < jj.ID
+		}
+
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+}
+
+func buildGraphLayout(issues []model.Issue, stats *analysis.GraphStats) *GraphLayout {
+	size := len(issues)
+	ids := make([]string, 0, size)
+	blockers := make(map[string][]string, size)
+	dependents := make(map[string][]string, size)
+
+	for i := range issues {
+		issue := &issues[i]
+		ids = append(ids, issue.ID)
+
+		for _, dep := range issue.Dependencies {
+			if dep == nil || !dep.Type.IsBlocking() {
+				continue
+			}
+			blockers[issue.ID] = append(blockers[issue.ID], dep.DependsOnID)
+			dependents[dep.DependsOnID] = append(dependents[dep.DependsOnID], issue.ID)
+		}
+	}
+
+	layout := &GraphLayout{
+		Blockers:   blockers,
+		Dependents: dependents,
+	}
+
+	if stats != nil {
+		layout.RankInDegree = stats.InDegreeRank()
+		layout.RankOutDegree = stats.OutDegreeRank()
+		layout.RankPageRank = stats.PageRankRank()
+		layout.RankBetweenness = stats.BetweennessRank()
+		layout.RankEigenvector = stats.EigenvectorRank()
+		layout.RankHubs = stats.HubsRank()
+		layout.RankAuthorities = stats.AuthoritiesRank()
+		layout.RankCriticalPath = stats.CriticalPathRank()
+	}
+
+	layout.SortedIDs = orderIssueIDsByRank(ids, layout.RankCriticalPath)
+	return layout
+}
+
+func buildBoardState(issues []model.Issue) *BoardState {
+	if len(issues) == 0 {
+		return nil
+	}
+	return &BoardState{
+		ByStatus:   groupIssuesByMode(issues, SwimByStatus),
+		ByPriority: groupIssuesByMode(issues, SwimByPriority),
+		ByType:     groupIssuesByMode(issues, SwimByType),
+	}
+}
+
+func orderIssueIDsByRank(ids []string, ranks map[string]int) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	// If we have a rank map, rebuild in O(n) without sorting (ranks are 1..N).
+	if len(ranks) > 0 {
+		ordered := make([]string, len(ids))
+		var missing []string
+
+		for _, id := range ids {
+			rank := ranks[id]
+			if rank < 1 || rank > len(ordered) || ordered[rank-1] != "" {
+				missing = append(missing, id)
+				continue
+			}
+			ordered[rank-1] = id
+		}
+
+		// Compact any gaps then append missing IDs deterministically.
+		out := make([]string, 0, len(ids))
+		for _, id := range ordered {
+			if id != "" {
+				out = append(out, id)
+			}
+		}
+		if len(missing) > 0 {
+			sort.Strings(missing)
+			out = append(out, missing...)
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+
+	// Fallback: stable alphabetical ordering.
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	return sorted
 }
 
 // GetGraphStats returns the GraphStats pointer for Phase 2 waiting.

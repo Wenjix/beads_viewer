@@ -2,6 +2,11 @@ package analysis_test
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -316,4 +321,100 @@ func TestGlobalCache(t *testing.T) {
 
 	// Clean up
 	cache.Invalidate()
+}
+
+func TestRobotDiskCache_WritesAndHits(t *testing.T) {
+	t.Setenv("BV_ROBOT", "1")
+	cacheDir := t.TempDir()
+	t.Setenv("BV_CACHE_DIR", cacheDir)
+
+	issues := []model.Issue{
+		{ID: "A", Status: model.StatusOpen},
+		{ID: "B", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "A", Type: model.DepBlocks},
+		}},
+	}
+
+	an := analysis.NewAnalyzer(issues)
+	config := analysis.ConfigForSize(2, 1)
+	stats1 := an.AnalyzeAsyncWithConfig(context.Background(), config)
+	stats1.WaitForPhase2()
+
+	dataHash := analysis.ComputeDataHash(issues)
+	configHash := analysis.ComputeConfigHash(&config)
+	fullKey := dataHash + "|" + configHash
+
+	cachePath := filepath.Join(cacheDir, "analysis_cache.json")
+	raw, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("reading cache file: %v", err)
+	}
+	var cf struct {
+		Version int                        `json:"version"`
+		Entries map[string]json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &cf); err != nil {
+		t.Fatalf("parsing cache json: %v", err)
+	}
+	if cf.Version != 1 {
+		t.Fatalf("cache version: got %d, want %d", cf.Version, 1)
+	}
+	if _, ok := cf.Entries[fullKey]; !ok {
+		t.Fatalf("expected cache entry for key %q", fullKey)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	an2 := analysis.NewAnalyzer(issues)
+	stats2 := an2.AnalyzeAsyncWithConfig(ctx, config)
+	stats2.WaitForPhase2()
+
+	if !stats2.IsPhase2Ready() {
+		t.Fatalf("expected phase2 ready on cache hit")
+	}
+	if !reflect.DeepEqual(stats1.PageRank(), stats2.PageRank()) {
+		t.Fatalf("pagerank mismatch on cache hit")
+	}
+	if !reflect.DeepEqual(stats1.Betweenness(), stats2.Betweenness()) {
+		t.Fatalf("betweenness mismatch on cache hit")
+	}
+	if !reflect.DeepEqual(stats1.Cycles(), stats2.Cycles()) {
+		t.Fatalf("cycles mismatch on cache hit")
+	}
+}
+
+func TestRobotDiskCache_EvictsToMaxEntries(t *testing.T) {
+	t.Setenv("BV_ROBOT", "1")
+	cacheDir := t.TempDir()
+	t.Setenv("BV_CACHE_DIR", cacheDir)
+
+	config := analysis.ConfigForSize(1, 0)
+	for i := 0; i < 11; i++ {
+		issues := []model.Issue{{ID: fmt.Sprintf("I%02d", i), Status: model.StatusOpen}}
+		an := analysis.NewAnalyzer(issues)
+		stats := an.AnalyzeAsyncWithConfig(context.Background(), config)
+		stats.WaitForPhase2()
+	}
+
+	cachePath := filepath.Join(cacheDir, "analysis_cache.json")
+	raw, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("reading cache file: %v", err)
+	}
+	var cf struct {
+		Version int                        `json:"version"`
+		Entries map[string]json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &cf); err != nil {
+		t.Fatalf("parsing cache json: %v", err)
+	}
+	if cf.Version != 1 {
+		t.Fatalf("cache version: got %d, want %d", cf.Version, 1)
+	}
+	if len(cf.Entries) > 10 {
+		t.Fatalf("expected <= 10 entries after eviction, got %d", len(cf.Entries))
+	}
+	if len(cf.Entries) != 10 {
+		t.Fatalf("expected 10 entries after eviction, got %d", len(cf.Entries))
+	}
 }

@@ -200,6 +200,63 @@ func TestWatcher_ChangedChannel(t *testing.T) {
 	}
 }
 
+func TestWatcher_EnvForcePolling(t *testing.T) {
+	t.Setenv("BV_FORCE_POLLING", "1")
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test.jsonl")
+	if err := os.WriteFile(tmpFile, []byte("initial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	w, err := NewWatcher(tmpFile,
+		WithDebounceDuration(10*time.Millisecond),
+		WithPollInterval(25*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+
+	if !w.IsPolling() {
+		t.Fatal("expected watcher to be in polling mode when BV_FORCE_POLLING is set")
+	}
+}
+
+func TestWatcher_RemoteFilesystem_UsesPolling(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test.jsonl")
+	if err := os.WriteFile(tmpFile, []byte("initial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := detectFilesystemTypeFunc
+	detectFilesystemTypeFunc = func(string) FilesystemType { return FSTypeNFS }
+	t.Cleanup(func() { detectFilesystemTypeFunc = orig })
+
+	w, err := NewWatcher(tmpFile,
+		WithDebounceDuration(10*time.Millisecond),
+		WithPollInterval(25*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+
+	if !w.IsPolling() {
+		t.Fatal("expected watcher to use polling on remote filesystem")
+	}
+	if got := w.FilesystemType(); got != FSTypeNFS {
+		t.Fatalf("expected filesystem type %v, got %v", FSTypeNFS, got)
+	}
+}
+
 func TestWatcher_FileRemoved(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test.jsonl")
@@ -209,8 +266,8 @@ func TestWatcher_FileRemoved(t *testing.T) {
 	}
 
 	var (
-		errMu     sync.Mutex
-		gotError  error
+		errMu    sync.Mutex
+		gotError error
 	)
 
 	w, err := NewWatcher(tmpFile,

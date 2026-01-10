@@ -113,14 +113,19 @@ type UpdateMsg struct {
 
 // Phase2ReadyMsg is sent when async graph analysis Phase 2 completes
 type Phase2ReadyMsg struct {
-	Stats *analysis.GraphStats // The stats that completed, to detect stale messages
+	Stats    *analysis.GraphStats // The stats that completed, to detect stale messages
+	Insights analysis.Insights    // Precomputed insights for Phase 2 metrics
 }
 
 // WaitForPhase2Cmd returns a command that waits for Phase 2 and sends Phase2ReadyMsg
 func WaitForPhase2Cmd(stats *analysis.GraphStats) tea.Cmd {
 	return func() tea.Msg {
+		if stats == nil {
+			return Phase2ReadyMsg{}
+		}
 		stats.WaitForPhase2()
-		return Phase2ReadyMsg{Stats: stats}
+		ins := stats.GenerateInsights(stats.NodeCount)
+		return Phase2ReadyMsg{Stats: stats, Insights: ins}
 	}
 }
 
@@ -129,6 +134,29 @@ type FileChangedMsg struct{}
 
 // semanticDebounceTickMsg is sent after debounce delay to trigger semantic computation
 type semanticDebounceTickMsg struct{}
+
+// workerPollTickMsg drives a small background-mode status refresh (spinner + freshness) (bv-9nfy).
+type workerPollTickMsg struct{}
+
+var workerSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+const (
+	freshnessErrorRetries = 3
+)
+
+func freshnessWarnThreshold() time.Duration {
+	return envDurationSeconds("BV_FRESHNESS_WARN_S", 30*time.Second)
+}
+
+func freshnessStaleThreshold() time.Duration {
+	return envDurationSeconds("BV_FRESHNESS_STALE_S", 2*time.Minute)
+}
+
+func workerPollTickCmd() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+		return workerPollTickMsg{}
+	})
+}
 
 // ReadyTimeoutMsg is sent after a short delay to ensure the UI becomes ready
 // even if the terminal doesn't send WindowSizeMsg promptly (bv-7wl7)
@@ -148,6 +176,35 @@ func WatchFileCmd(w *watcher.Watcher) tea.Cmd {
 	return func() tea.Msg {
 		<-w.Changed()
 		return FileChangedMsg{}
+	}
+}
+
+// StartBackgroundWorkerCmd starts the background worker and triggers an initial refresh.
+func StartBackgroundWorkerCmd(w *BackgroundWorker) tea.Cmd {
+	return func() tea.Msg {
+		if w == nil {
+			return nil
+		}
+		if err := w.Start(); err != nil {
+			return SnapshotErrorMsg{Err: fmt.Errorf("starting background worker: %w", err), Recoverable: false}
+		}
+		w.TriggerRefresh()
+		return nil
+	}
+}
+
+// WaitForBackgroundWorkerMsgCmd waits for the next BackgroundWorker message.
+func WaitForBackgroundWorkerMsgCmd(w *BackgroundWorker) tea.Cmd {
+	return func() tea.Msg {
+		if w == nil {
+			return nil
+		}
+		select {
+		case msg := <-w.Messages():
+			return msg
+		case <-w.Done():
+			return nil
+		}
 	}
 }
 
@@ -252,13 +309,24 @@ func LoadHistoryCmd(issues []model.Issue, beadsPath string) tea.Cmd {
 	}
 }
 
+func cloneIssuesForAsync(issues []model.Issue) []model.Issue {
+	if len(issues) == 0 {
+		return nil
+	}
+	clones := make([]model.Issue, len(issues))
+	for i := range issues {
+		clones[i] = issues[i].Clone()
+	}
+	return clones
+}
+
 // Model is the main Bubble Tea model for the beads viewer
 type Model struct {
 	// Data
-	issues    []model.Issue
-	issueMap  map[string]*model.Issue
-	analyzer  *analysis.Analyzer
-	analysis  *analysis.GraphStats
+	issues       []model.Issue
+	issueMap     map[string]*model.Issue
+	analyzer     *analysis.Analyzer
+	analysis     *analysis.GraphStats
 	beadsPath    string           // Path to beads.jsonl for reloading
 	watcher      *watcher.Watcher // File watcher for live reload
 	instanceLock *instance.Lock   // Multi-instance coordination lock
@@ -268,8 +336,13 @@ type Model struct {
 	// Access is safe without locks because Bubble Tea ensures Update() and View()
 	// don't run concurrently. When nil, the UI uses legacy m.issues/m.issueMap fields.
 	snapshot *DataSnapshot
+	// snapshotInitPending is true until we receive the first BackgroundWorker snapshot
+	// (or an error), allowing a polished cold-start loading screen (bv-tspo).
+	snapshotInitPending bool
 	// backgroundWorker manages async data loading (nil if background mode disabled)
 	backgroundWorker *BackgroundWorker
+	workerSpinnerIdx int // Spinner frame for background worker activity (bv-9nfy)
+	lastForceRefresh time.Time
 
 	// UI Components
 	list               list.Model
@@ -280,7 +353,7 @@ type Model struct {
 	velocityComparison VelocityComparisonModel // bv-125
 	shortcutsSidebar   ShortcutsSidebar        // bv-3qi5
 	graphView          GraphModel
-	tree               TreeModel   // Hierarchical tree view (bv-gllx)
+	tree               TreeModel // Hierarchical tree view (bv-gllx)
 	insightsPanel      InsightsModel
 	flowMatrix         FlowMatrixModel // Cross-label flow matrix
 	theme              Theme
@@ -291,8 +364,8 @@ type Model struct {
 	updateURL       string
 
 	// Focus and View State
-	focused         focus
-	focusBeforeHelp focus // Stores focus before opening help overlay
+	focused                  focus
+	focusBeforeHelp          focus // Stores focus before opening help overlay
 	isSplitView              bool
 	isBoardView              bool
 	isGraphView              bool
@@ -619,6 +692,16 @@ func (m *Model) clearSemanticScores() {
 	}
 }
 
+func (m *Model) issuesForAsync() []model.Issue {
+	if m == nil {
+		return nil
+	}
+	if m.snapshot != nil && len(m.snapshot.pooledIssues) > 0 {
+		return cloneIssuesForAsync(m.issues)
+	}
+	return m.issues
+}
+
 // NewModel creates a new Model from the given issues
 // beadsPath is the path to the beads.jsonl file for live reload support
 func NewModel(issues []model.Issue, activeRecipe *recipe.Recipe, beadsPath string) Model {
@@ -830,7 +913,31 @@ func NewModel(issues []model.Issue, activeRecipe *recipe.Recipe, beadsPath strin
 	// Initialize file watcher for live reload
 	var fileWatcher *watcher.Watcher
 	var watcherErr error
-	if beadsPath != "" {
+	var backgroundWorker *BackgroundWorker
+	var backgroundModeErr error
+	backgroundModeRequested := false
+	if v := strings.TrimSpace(os.Getenv("BV_BACKGROUND_MODE")); v != "" {
+		switch strings.ToLower(v) {
+		case "1", "true", "yes", "on":
+			backgroundModeRequested = true
+		case "0", "false", "no", "off":
+			backgroundModeRequested = false
+		}
+	}
+
+	if beadsPath != "" && backgroundModeRequested {
+		bw, err := NewBackgroundWorker(WorkerConfig{
+			BeadsPath:     beadsPath,
+			DebounceDelay: 200 * time.Millisecond,
+		})
+		if err != nil {
+			backgroundModeErr = err
+		} else {
+			backgroundWorker = bw
+		}
+	}
+
+	if beadsPath != "" && backgroundWorker == nil {
 		w, err := watcher.NewWatcher(beadsPath,
 			watcher.WithDebounceDuration(200*time.Millisecond),
 		)
@@ -867,7 +974,13 @@ func NewModel(issues []model.Issue, activeRecipe *recipe.Recipe, beadsPath strin
 	// Build initial status message if watcher failed
 	var initialStatus string
 	var initialStatusErr bool
-	if watcherErr != nil {
+	if backgroundWorker != nil {
+		initialStatus = "Background mode enabled"
+		initialStatusErr = false
+	} else if backgroundModeRequested && backgroundModeErr != nil {
+		initialStatus = fmt.Sprintf("Background mode unavailable: %v (using sync reload)", backgroundModeErr)
+		initialStatusErr = true
+	} else if watcherErr != nil {
 		initialStatus = fmt.Sprintf("Live reload unavailable: %v", watcherErr)
 		initialStatusErr = true
 	}
@@ -891,6 +1004,8 @@ func NewModel(issues []model.Issue, activeRecipe *recipe.Recipe, beadsPath strin
 		analysis:               graphStats,
 		beadsPath:              beadsPath,
 		watcher:                fileWatcher,
+		snapshotInitPending:    backgroundWorker != nil,
+		backgroundWorker:       backgroundWorker,
 		instanceLock:           instLock,
 		list:                   l,
 		viewport:               vp,
@@ -965,12 +1080,16 @@ func (m Model) Init() tea.Cmd {
 		CheckUpdateCmd(),
 		WaitForPhase2Cmd(m.analysis),
 	}
-	if m.watcher != nil {
+	if m.backgroundWorker != nil {
+		cmds = append(cmds, StartBackgroundWorkerCmd(m.backgroundWorker))
+		cmds = append(cmds, WaitForBackgroundWorkerMsgCmd(m.backgroundWorker))
+		cmds = append(cmds, workerPollTickCmd())
+	} else if m.watcher != nil {
 		cmds = append(cmds, WatchFileCmd(m.watcher))
 	}
 	// Start loading history in background
 	if len(m.issues) > 0 {
-		cmds = append(cmds, LoadHistoryCmd(m.issues, m.beadsPath))
+		cmds = append(cmds, LoadHistoryCmd(m.issuesForAsync(), m.beadsPath))
 	}
 	// Check for AGENTS.md integration prompt (bv-i8dk)
 	if m.workDir != "" && !m.workspaceMode {
@@ -982,6 +1101,13 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
+
+	if m.backgroundWorker != nil {
+		switch msg.(type) {
+		case tea.KeyMsg, tea.MouseMsg:
+			m.backgroundWorker.recordActivity()
+		}
+	}
 
 	switch msg := msg.(type) {
 	case UpdateMsg:
@@ -1104,6 +1230,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case workerPollTickMsg:
+		if m.backgroundWorker != nil {
+			state := m.backgroundWorker.State()
+			if state == WorkerProcessing {
+				m.workerSpinnerIdx = (m.workerSpinnerIdx + 1) % len(workerSpinnerFrames)
+			} else {
+				m.workerSpinnerIdx = 0
+			}
+			if state != WorkerStopped {
+				cmds = append(cmds, workerPollTickCmd())
+			}
+		}
+
 	case Phase2ReadyMsg:
 		// Ignore stale Phase2 completions (from before a file reload)
 		if msg.Stats != m.analysis {
@@ -1115,15 +1254,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.snapshot.Phase2Ready = true
 		}
 
-		// Phase 2 analysis complete - regenerate insights with full data
-		ins := m.analysis.GenerateInsights(len(m.issues))
-		m.insightsPanel = NewInsightsModel(ins, m.issueMap, m.theme)
+		// Phase 2 analysis complete - update insights with full data (computed off-thread).
+		ins := msg.Insights
+		if m.snapshot != nil {
+			m.snapshot.Insights = ins
+		}
+		m.insightsPanel.SetInsights(ins)
+		m.insightsPanel.issueMap = m.issueMap
 		bodyHeight := m.height - 1
 		if bodyHeight < 5 {
 			bodyHeight = 5
 		}
 		m.insightsPanel.SetSize(m.width, bodyHeight)
-		m.graphView.SetIssues(m.issues, &ins)
+		if m.snapshot != nil {
+			if m.snapshot.GraphLayout != nil {
+				m.snapshot.GraphLayout.UpdatePhase2Ranks(msg.Stats)
+			}
+			m.graphView.SetSnapshot(m.snapshot)
+		} else {
+			m.graphView.SetIssues(m.issues, &ins)
+		}
 
 		// Generate triage for priority panel (bv-91) - reuse existing analyzer/stats (bv-runn.12)
 		triage := analysis.ComputeTriageFromAnalyzer(m.analyzer, m.analysis, m.issues, analysis.TriageOptions{}, time.Now())
@@ -1157,18 +1307,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeRecipe != nil {
 			switch m.activeRecipe.Sort.Field {
 			case "impact", "pagerank":
+				field := m.activeRecipe.Sort.Field
 				descending := m.activeRecipe.Sort.Direction == "desc"
 				sort.Slice(m.issues, func(i, j int) bool {
-					var less bool
-					if m.activeRecipe.Sort.Field == "impact" {
-						less = m.analysis.GetCriticalPathScore(m.issues[i].ID) < m.analysis.GetCriticalPathScore(m.issues[j].ID)
-					} else {
-						less = m.analysis.GetPageRankScore(m.issues[i].ID) < m.analysis.GetPageRankScore(m.issues[j].ID)
+					ii := m.issues[i]
+					jj := m.issues[j]
+
+					var iScore, jScore float64
+					if m.analysis != nil {
+						if field == "impact" {
+							iScore = m.analysis.GetCriticalPathScore(ii.ID)
+							jScore = m.analysis.GetCriticalPathScore(jj.ID)
+						} else {
+							iScore = m.analysis.GetPageRankScore(ii.ID)
+							jScore = m.analysis.GetPageRankScore(jj.ID)
+						}
+					}
+
+					var cmp int
+					switch {
+					case iScore < jScore:
+						cmp = -1
+					case iScore > jScore:
+						cmp = 1
+					}
+					if cmp == 0 {
+						return ii.ID < jj.ID
 					}
 					if descending {
-						return !less
+						return cmp > 0
 					}
-					return less
+					return cmp < 0
 				})
 				// Rebuild issueMap after re-sort (pointers become stale after sorting)
 				for i := range m.issues {
@@ -1190,6 +1359,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Verify this update matches the current snapshot using DataHash
 		if m.snapshot == nil || m.snapshot.DataHash != msg.DataHash {
 			// Stale update - ignore
+			if m.backgroundWorker != nil {
+				return m, WaitForBackgroundWorkerMsgCmd(m.backgroundWorker)
+			}
 			return m, nil
 		}
 
@@ -1201,6 +1373,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// is a complementary notification from the BackgroundWorker that Phase 2
 		// completed. If Phase2ReadyMsg hasn't fired yet, it will handle the full
 		// UI refresh. If it already fired (race condition), this is a no-op.
+		if m.backgroundWorker != nil {
+			return m, WaitForBackgroundWorkerMsgCmd(m.backgroundWorker)
+		}
 		return m, nil
 
 	case HistoryLoadedMsg:
@@ -1231,7 +1406,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Background worker has a new snapshot ready (bv-m7v8)
 		// This is the atomic pointer swap - O(1), sub-microsecond
 		if msg.Snapshot == nil {
+			if m.backgroundWorker != nil {
+				return m, WaitForBackgroundWorkerMsgCmd(m.backgroundWorker)
+			}
 			return m, nil
+		}
+
+		firstSnapshot := m.snapshotInitPending && m.snapshot == nil
+		m.snapshotInitPending = false
+
+		// Clear ephemeral overlays tied to old data
+		m.clearAttentionOverlay()
+
+		// Exit time-travel mode if active (file changed, show current state)
+		if m.timeTravelMode {
+			m.timeTravelMode = false
+			m.timeTravelDiff = nil
+			m.timeTravelSince = ""
+			m.newIssueIDs = nil
+			m.closedIssueIDs = nil
+			m.modifiedIssueIDs = nil
 		}
 
 		// Store selected issue ID to restore position after swap
@@ -1242,8 +1436,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Preserve board selection by issue ID (bv-6n4c).
+		var boardSelectedID string
+		if m.focused == focusBoard {
+			if sel := m.board.SelectedIssue(); sel != nil {
+				boardSelectedID = sel.ID
+			}
+		}
+
+		oldSnapshot := m.snapshot
+
 		// Swap snapshot pointer
 		m.snapshot = msg.Snapshot
+		if m.backgroundWorker != nil {
+			latencyStart := msg.FileChangeAt
+			if latencyStart.IsZero() {
+				latencyStart = msg.SentAt
+			}
+			if !latencyStart.IsZero() {
+				m.backgroundWorker.recordUIUpdateLatency(time.Since(latencyStart))
+			}
+		}
+		if oldSnapshot != nil && len(oldSnapshot.pooledIssues) > 0 {
+			go loader.ReturnIssuePtrsToPool(oldSnapshot.pooledIssues)
+		}
 
 		// Update legacy fields for backwards compatibility during migration
 		// Eventually these will be removed when all code reads from snapshot
@@ -1265,58 +1481,275 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.labelHealthCached = false
 		m.attentionCached = false
 		m.priorityHints = make(map[string]*analysis.PriorityRecommendation)
+		m.labelDrilldownCache = make(map[string][]model.Issue)
 
-		// Rebuild list items from snapshot
-		items := make([]list.Item, len(msg.Snapshot.ListItems))
-		for i := range msg.Snapshot.ListItems {
-			items[i] = msg.Snapshot.ListItems[i]
+		// Recompute alerts for refreshed dataset
+		m.alerts, m.alertsCritical, m.alertsWarning, m.alertsInfo = computeAlerts(m.issues, m.analysis, m.analyzer)
+		m.dismissedAlerts = make(map[string]bool)
+		m.showAlertsPanel = false
+
+		// Reset semantic caches for the new dataset.
+		if m.semanticSearch != nil {
+			m.semanticSearch.ResetCache()
+			m.semanticSearch.SetMetricsCache(nil)
 		}
-		m.list.SetItems(items)
+		m.semanticHybridReady = false
+		m.semanticHybridBuilding = false
+		if m.semanticHybridEnabled {
+			m.semanticHybridBuilding = true
+			cmds = append(cmds, BuildHybridMetricsCmd(m.issuesForAsync()))
+		}
 
-		// Restore selection if possible
-		if selectedID != "" {
-			for i, it := range items {
-				if item, ok := it.(IssueItem); ok && item.Issue.ID == selectedID {
+		// Regenerate sub-views (Phase 1 data; Phase 2 will update via Phase2ReadyMsg)
+		m.insightsPanel.SetInsights(m.snapshot.Insights)
+		m.insightsPanel.issueMap = m.issueMap
+		bodyHeight := m.height - 1
+		if bodyHeight < 5 {
+			bodyHeight = 5
+		}
+		m.insightsPanel.SetSize(m.width, bodyHeight)
+
+		// Update list/board/graph views while preserving the current recipe/filter state.
+		if m.activeRecipe != nil {
+			// If the snapshot already includes recipe filtering/sorting, use it directly (bv-cwwd).
+			if msg.Snapshot.RecipeName == m.activeRecipe.Name && msg.Snapshot.RecipeHash == recipeFingerprint(m.activeRecipe) {
+				filteredItems := make([]list.Item, 0, len(msg.Snapshot.ListItems))
+				filteredIssues := make([]model.Issue, 0, len(msg.Snapshot.ListItems))
+
+				for _, item := range msg.Snapshot.ListItems {
+					issue := item.Issue
+
+					// Workspace repo filter (nil = all repos)
+					if m.workspaceMode && m.activeRepos != nil {
+						repoKey := strings.ToLower(item.RepoPrefix)
+						if repoKey != "" && !m.activeRepos[repoKey] {
+							continue
+						}
+					}
+
+					filteredItems = append(filteredItems, item)
+					filteredIssues = append(filteredIssues, issue)
+				}
+
+				m.list.SetItems(filteredItems)
+				m.updateSemanticIDs(filteredItems)
+				m.board.SetIssues(filteredIssues)
+
+				recipeIns := analysis.Insights{}
+				if m.analysis != nil {
+					recipeIns = m.analysis.GenerateInsights(len(filteredIssues))
+				}
+				m.graphView.SetIssues(filteredIssues, &recipeIns)
+
+				m.currentFilter = "recipe:" + m.activeRecipe.Name
+
+				// Keep selection in bounds
+				if len(filteredItems) > 0 && m.list.Index() >= len(filteredItems) {
+					m.list.Select(0)
+				}
+			} else {
+				m.applyRecipe(m.activeRecipe)
+			}
+		} else {
+			var filteredItems []list.Item
+			var filteredIssues []model.Issue
+
+			filteredItems = make([]list.Item, 0, len(msg.Snapshot.ListItems))
+			filteredIssues = make([]model.Issue, 0, len(msg.Snapshot.ListItems))
+
+			for _, item := range msg.Snapshot.ListItems {
+				issue := item.Issue
+
+				// Workspace repo filter (nil = all repos)
+				if m.workspaceMode && m.activeRepos != nil {
+					repoKey := strings.ToLower(item.RepoPrefix)
+					if repoKey != "" && !m.activeRepos[repoKey] {
+						continue
+					}
+				}
+
+				include := false
+				switch m.currentFilter {
+				case "all":
+					include = true
+				case "open":
+					include = issue.Status != model.StatusClosed
+				case "closed":
+					include = issue.Status == model.StatusClosed
+				case "ready":
+					// Ready = Open/InProgress AND NO Open Blockers
+					if issue.Status != model.StatusClosed && issue.Status != model.StatusBlocked {
+						isBlocked := false
+						for _, dep := range issue.Dependencies {
+							if dep == nil || dep.Type != model.DepBlocks {
+								continue
+							}
+							if blocker, exists := m.issueMap[dep.DependsOnID]; exists && blocker.Status != model.StatusClosed {
+								isBlocked = true
+								break
+							}
+						}
+						include = !isBlocked
+					}
+				default:
+					if strings.HasPrefix(m.currentFilter, "label:") {
+						label := strings.TrimPrefix(m.currentFilter, "label:")
+						for _, l := range issue.Labels {
+							if l == label {
+								include = true
+								break
+							}
+						}
+					}
+				}
+
+				if include {
+					filteredItems = append(filteredItems, item)
+					filteredIssues = append(filteredIssues, issue)
+				}
+			}
+
+			m.sortFilteredItems(filteredItems, filteredIssues)
+			m.list.SetItems(filteredItems)
+			m.updateSemanticIDs(filteredItems)
+			if m.snapshot != nil && m.snapshot.BoardState != nil && (!m.workspaceMode || m.activeRepos == nil) && len(filteredIssues) == len(m.snapshot.Issues) {
+				m.board.SetSnapshot(m.snapshot)
+			} else {
+				m.board.SetIssues(filteredIssues)
+			}
+			if m.snapshot != nil && m.snapshot.GraphLayout != nil && len(filteredIssues) == len(m.snapshot.Issues) {
+				m.graphView.SetSnapshot(m.snapshot)
+			} else {
+				m.graphView.SetIssues(filteredIssues, &m.snapshot.Insights)
+			}
+
+			// Restore selection if possible
+			if selectedID != "" {
+				for i, it := range filteredItems {
+					if item, ok := it.(IssueItem); ok && item.Issue.ID == selectedID {
+						m.list.Select(i)
+						break
+					}
+				}
+			}
+
+			// Keep selection in bounds
+			if len(filteredItems) > 0 && m.list.Index() >= len(filteredItems) {
+				m.list.Select(0)
+			}
+		}
+
+		// Restore selection in recipe mode (applyRecipe rebuilds list items)
+		if m.activeRecipe != nil && selectedID != "" {
+			items := m.list.Items()
+			for i := range items {
+				if item, ok := items[i].(IssueItem); ok && item.Issue.ID == selectedID {
 					m.list.Select(i)
 					break
 				}
 			}
 		}
 
-		// Update sub-views
-		m.board.SetIssues(m.issues)
-		if ins := m.analysis.GenerateInsights(len(m.issues)); len(ins.Bottlenecks) > 0 || len(ins.Keystones) > 0 {
-			m.insightsPanel.SetInsights(ins)
+		// Restore board selection after SetIssues/applyRecipe rebuilds columns (bv-6n4c).
+		if boardSelectedID != "" {
+			_ = m.board.SelectIssueByID(boardSelectedID)
 		}
-		m.graphView.SetIssues(m.issues, nil)
+
+		// If the tree view is active, rebuild it from the new snapshot while preserving
+		// user state (selection + persisted expand/collapse) (bv-6n4c).
+		if m.focused == focusTree {
+			m.tree.BuildFromSnapshot(m.snapshot)
+			m.tree.SetSize(m.width, m.height-2)
+		}
 
 		// Refresh detail pane if visible
 		if m.isSplitView || m.showDetails {
 			m.updateViewportContent()
 		}
 
-		// Clear ephemeral overlays
-		m.clearAttentionOverlay()
+		// Keep semantic index current when enabled.
+		if m.semanticSearchEnabled && !m.semanticIndexBuilding {
+			m.semanticIndexBuilding = true
+			cmds = append(cmds, BuildSemanticIndexCmd(m.issuesForAsync()))
+		}
+
+		// Reload sprints (bv-161)
+		if m.beadsPath != "" {
+			beadsDir := filepath.Dir(m.beadsPath)
+			if loaded, err := loader.LoadSprintsFromFile(filepath.Join(beadsDir, loader.SprintsFileName)); err == nil {
+				m.sprints = loaded
+				// If we have a selected sprint, try to refresh it
+				if m.selectedSprint != nil {
+					found := false
+					for i := range m.sprints {
+						if m.sprints[i].ID == m.selectedSprint.ID {
+							m.selectedSprint = &m.sprints[i]
+							m.sprintViewText = m.renderSprintDashboard()
+							found = true
+							break
+						}
+					}
+					if !found {
+						m.selectedSprint = nil
+						m.sprintViewText = "Sprint not found"
+					}
+				}
+			}
+		}
+
+		if firstSnapshot {
+			// For the initial background snapshot, avoid flashing "Reloaded" at startup.
+			if msg.Snapshot.LoadWarningCount > 0 {
+				m.statusMsg = fmt.Sprintf("Loaded %d issues (%d warnings)", len(m.issues), msg.Snapshot.LoadWarningCount)
+			} else {
+				m.statusMsg = ""
+			}
+		} else if msg.Snapshot.LoadWarningCount > 0 {
+			m.statusMsg = fmt.Sprintf("Reloaded %d issues (%d warnings)", len(m.issues), msg.Snapshot.LoadWarningCount)
+		} else {
+			m.statusMsg = fmt.Sprintf("Reloaded %d issues", len(m.issues))
+		}
+		m.statusIsError = false
 
 		// Wait for Phase 2 if not ready
 		if msg.Snapshot.Analysis != nil {
 			cmds = append(cmds, WaitForPhase2Cmd(msg.Snapshot.Analysis))
 		}
 
+		if m.backgroundWorker != nil {
+			cmds = append(cmds, WaitForBackgroundWorkerMsgCmd(m.backgroundWorker))
+		}
+
 		return m, tea.Batch(cmds...)
 
 	case SnapshotErrorMsg:
 		// Background worker encountered an error loading/processing data
-		// Log the error; if recoverable, we'll try again on next file change
-		if msg.Err != nil {
-			// TODO: Display error in status bar or notification area
-			// For now, just log it
-			_ = msg.Recoverable // Suppress unused variable warning
+		// If recoverable, we'll try again on next file change.
+		if m.snapshotInitPending && m.snapshot == nil {
+			m.snapshotInitPending = false
 		}
-		return m, nil
+		if msg.Err != nil {
+			if msg.Recoverable {
+				m.statusMsg = fmt.Sprintf("Background reload error (will retry): %v", msg.Err)
+			} else {
+				m.statusMsg = fmt.Sprintf("Background reload error: %v", msg.Err)
+			}
+			m.statusIsError = true
+		}
+		if m.backgroundWorker != nil {
+			cmds = append(cmds, WaitForBackgroundWorkerMsgCmd(m.backgroundWorker))
+		}
+		return m, tea.Batch(cmds...)
 
 	case FileChangedMsg:
 		// File changed on disk - reload issues and recompute analysis
+		// In background mode the BackgroundWorker owns file watching and snapshot building.
+		if m.backgroundWorker != nil {
+			if m.watcher != nil {
+				cmds = append(cmds, WatchFileCmd(m.watcher))
+			}
+			return m, tea.Batch(cmds...)
+		}
 		if m.beadsPath == "" {
 			// Re-start watch for next change
 			if m.watcher != nil {
@@ -1448,7 +1881,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.semanticHybridBuilding = false
 		if m.semanticHybridEnabled {
 			m.semanticHybridBuilding = true
-			cmds = append(cmds, BuildHybridMetricsCmd(m.issues))
+			cmds = append(cmds, BuildHybridMetricsCmd(m.issuesForAsync()))
 		}
 		m.list.SetItems(items)
 
@@ -1507,7 +1940,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Keep semantic index current when enabled.
 		if m.semanticSearchEnabled && !m.semanticIndexBuilding {
 			m.semanticIndexBuilding = true
-			cmds = append(cmds, BuildSemanticIndexCmd(m.issues))
+			cmds = append(cmds, BuildSemanticIndexCmd(m.issuesForAsync()))
 		}
 
 		if cacheHit {
@@ -1837,6 +2270,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Force refresh (bv-4auz): Ctrl+R / F5 triggers an immediate reload.
+		if (msg.String() == "ctrl+r" || msg.String() == "f5") && m.list.FilterState() != list.Filtering {
+			now := time.Now()
+			if !m.lastForceRefresh.IsZero() && now.Sub(m.lastForceRefresh) < time.Second {
+				return m, nil
+			}
+			m.lastForceRefresh = now
+
+			m.statusMsg = "Refreshing…"
+			m.statusIsError = false
+
+			if m.backgroundWorker != nil {
+				m.backgroundWorker.ForceRefresh()
+				cmds = append(cmds, WaitForBackgroundWorkerMsgCmd(m.backgroundWorker))
+				return m, tea.Batch(cmds...)
+			}
+
+			if m.beadsPath == "" && m.watcher == nil {
+				m.statusMsg = "Refresh unavailable"
+				m.statusIsError = true
+				return m, nil
+			}
+
+			cmds = append(cmds, func() tea.Msg { return FileChangedMsg{} })
+			return m, tea.Batch(cmds...)
+		}
+
 		// Handle shortcuts sidebar toggle (; or F2) - bv-3qi5
 		if (msg.String() == ";" || msg.String() == "f2") && m.list.FilterState() != list.Filtering {
 			m.showShortcutsSidebar = !m.showShortcutsSidebar
@@ -1880,7 +2340,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.semanticHybridEnabled && !m.semanticHybridReady && !m.semanticHybridBuilding {
 					m.semanticHybridBuilding = true
 					m.statusMsg = "Hybrid search: computing metrics…"
-					cmds = append(cmds, BuildHybridMetricsCmd(m.issues))
+					cmds = append(cmds, BuildHybridMetricsCmd(m.issuesForAsync()))
 				} else if m.semanticHybridEnabled {
 					m.statusMsg = fmt.Sprintf("Hybrid search enabled (%s)", m.semanticHybridPreset)
 				} else {
@@ -1928,7 +2388,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if !m.semanticSearch.Snapshot().Ready && !m.semanticIndexBuilding {
 						m.semanticIndexBuilding = true
 						m.statusMsg = "Semantic search: building index…"
-						cmds = append(cmds, BuildSemanticIndexCmd(m.issues))
+						cmds = append(cmds, BuildSemanticIndexCmd(m.issuesForAsync()))
 					} else if !m.semanticSearch.Snapshot().Ready && m.semanticIndexBuilding {
 						m.statusMsg = "Semantic search: indexing…"
 					} else {
@@ -1942,7 +2402,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if m.semanticHybridEnabled && !m.semanticHybridReady && !m.semanticHybridBuilding {
 					m.semanticHybridBuilding = true
-					cmds = append(cmds, BuildHybridMetricsCmd(m.issues))
+					cmds = append(cmds, BuildHybridMetricsCmd(m.issuesForAsync()))
 				}
 			} else {
 				m.list.Filter = list.DefaultFilter
@@ -2155,8 +2615,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.isBoardView = false
 					m.isActionableView = false
 					m.isHistoryView = false
-					// Build tree from all issues
-					m.tree.Build(m.issues)
+					// Build tree from snapshot when available (bv-t435)
+					if m.snapshot != nil {
+						m.tree.BuildFromSnapshot(m.snapshot)
+					} else {
+						m.tree.Build(m.issues)
+					}
 					m.tree.SetSize(m.width, m.height-2)
 					m.focused = focusTree
 				}
@@ -2172,9 +2636,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.isActionableView = false
 					m.isHistoryView = false
 					m.focused = focusInsights
-					// Refresh insights using latest analysis snapshot
-					if m.analysis != nil {
-						ins := m.analysis.GenerateInsights(len(m.issues))
+					// Refresh insights using the current snapshot when available (bv-mpqz).
+					var ins analysis.Insights
+					hasInsights := false
+					if m.snapshot != nil {
+						ins = m.snapshot.Insights
+						hasInsights = true
+					} else if m.analysis != nil {
+						ins = m.analysis.GenerateInsights(len(m.issues))
+						hasInsights = true
+					}
+					if hasInsights {
 						m.insightsPanel = NewInsightsModel(ins, m.issueMap, m.theme)
 						// Include priority triage (bv-91) - reuse existing analyzer/stats (bv-runn.12)
 						triage := analysis.ComputeTriageFromAnalyzer(m.analyzer, m.analysis, m.issues, analysis.TriageOptions{}, time.Now())
@@ -2310,7 +2782,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 
-			case "'", "f5":
+			case "'":
 				// Toggle recipe picker overlay
 				m.showRecipePicker = !m.showRecipePicker
 				if m.showRecipePicker {
@@ -3318,7 +3790,7 @@ func (m Model) handleRecipePickerKeys(msg tea.KeyMsg) Model {
 	case "enter":
 		// Apply selected recipe
 		if selected := m.recipePicker.SelectedRecipe(); selected != nil {
-			m.activeRecipe = selected
+			m.setActiveRecipe(selected)
 			m.applyRecipe(selected)
 		}
 		m.showRecipePicker = false
@@ -3526,7 +3998,7 @@ func (m Model) handleListKeys(msg tea.KeyMsg) Model {
 	case "S":
 		// Apply triage recipe - sort by triage score (bv-151)
 		if r := m.recipeLoader.Get("triage"); r != nil {
-			m.activeRecipe = r
+			m.setActiveRecipe(r)
 			m.applyRecipe(r)
 		}
 	case "s":
@@ -3656,6 +4128,29 @@ func (m Model) handleHelpKeys(msg tea.KeyMsg) Model {
 	return m
 }
 
+func (m Model) renderLoadingScreen() string {
+	frame := workerSpinnerFrames[0]
+	if m.backgroundWorker != nil && m.backgroundWorker.State() == WorkerProcessing {
+		frame = workerSpinnerFrames[m.workerSpinnerIdx%len(workerSpinnerFrames)]
+	}
+
+	spinnerStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
+	titleStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
+	subStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+
+	lines := []string{
+		spinnerStyle.Render(frame),
+		"",
+		titleStyle.Render("Loading beads..."),
+	}
+	if m.beadsPath != "" {
+		lines = append(lines, "", subStyle.Render(m.beadsPath))
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Center, lines...)
+	return lipgloss.Place(m.width, m.height-1, lipgloss.Center, lipgloss.Center, content)
+}
+
 func (m Model) View() string {
 	if !m.ready {
 		return "Initializing..."
@@ -3696,6 +4191,8 @@ func (m Model) View() string {
 	} else if m.showTutorial {
 		// Interactive tutorial (bv-8y31) - full screen overlay
 		body = m.tutorialModel.View()
+	} else if m.snapshotInitPending && m.snapshot == nil {
+		body = m.renderLoadingScreen()
 	} else if m.focused == focusInsights {
 		m.insightsPanel.SetSize(m.width, m.height-1)
 		body = m.insightsPanel.View()
@@ -4094,11 +4591,23 @@ func (m *Model) renderHelpOverlay() string {
 
 	actionsSection := []struct{ key, desc string }{
 		{"p", "Priority hints"},
+		{"Ctrl+R", "Force refresh"},
+		{"F5", "Force refresh"},
 		{"t", "Time-travel"},
 		{"T", "Quick time-travel"},
 		{"x", "Export markdown"},
 		{"C", "Copy to clipboard"},
 		{"O", "Open in editor"},
+	}
+
+	statusSection := []struct{ key, desc string }{
+		{"◌ metrics", "Phase 2 metrics computing"},
+		{"⚠ age", "Snapshot getting stale"},
+		{"⚠ STALE", "Snapshot is stale"},
+		{"✗ bg", "Background worker errors"},
+		{"↻ recov", "Worker self-healed"},
+		{"⚠ dead", "Worker unresponsive"},
+		{"polling", "Live reload uses polling"},
 	}
 
 	// Build panels
@@ -4109,6 +4618,7 @@ func (m *Model) renderHelpOverlay() string {
 		renderPanel("Filters & Sort", "🔍", 3, filterSection),
 		renderPanel("Graph View", "📊", 4, graphSection),
 		renderPanel("Insights", "💡", 5, insightsSection),
+		renderPanel("Status", "🩺", 2, statusSection),
 		renderPanel("History", "📜", 0, historySection),
 		renderPanel("Actions", "⚡", 1, actionsSection),
 	}
@@ -4645,7 +5155,11 @@ func (m *Model) renderFooter() string {
 				Bold(true).
 				Padding(0, 2)
 		}
-		msgSection := msgStyle.Render("✓ " + m.statusMsg)
+		prefix := "✓ "
+		if m.statusIsError {
+			prefix = "✗ "
+		}
+		msgSection := msgStyle.Render(prefix + m.statusMsg)
 		remaining := m.width - lipgloss.Width(msgSection)
 		if remaining < 0 {
 			remaining = 0
@@ -4808,6 +5322,154 @@ func (m *Model) renderFooter() string {
 			closedStyle.Render("●"),
 			m.countClosed)
 		statsSection = statsStyle.Render(statsContent)
+	}
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// FRESHNESS / WORKER BADGE - Staleness + errors + background worker activity (bv-h305)
+	// ─────────────────────────────────────────────────────────────────────────
+	workerSection := ""
+	if m.backgroundWorker != nil {
+		formatAge := func(d time.Duration) string {
+			switch {
+			case d < time.Second:
+				return "<1s"
+			case d < time.Minute:
+				return fmt.Sprintf("%ds", int(d.Seconds()))
+			case d < time.Hour:
+				return fmt.Sprintf("%dm", int(d.Minutes()))
+			case d < 24*time.Hour:
+				return fmt.Sprintf("%dh", int(d.Hours()))
+			default:
+				return fmt.Sprintf("%dd", int(d.Hours()/24))
+			}
+		}
+
+		var snapshotAge time.Duration
+		hasSnapshotAge := false
+		if m.snapshot != nil && !m.snapshot.CreatedAt.IsZero() {
+			snapshotAge = time.Since(m.snapshot.CreatedAt)
+			hasSnapshotAge = true
+		}
+
+		state := m.backgroundWorker.State()
+		health := m.backgroundWorker.Health()
+		lastErr := m.backgroundWorker.LastError()
+
+		var style lipgloss.Style
+		var text string
+		switch {
+		case health.Started && !health.Alive:
+			style = lipgloss.NewStyle().
+				Background(ColorPrioCriticalBg).
+				Foreground(ColorPrioCritical).
+				Bold(true).
+				Padding(0, 1)
+			text = "⚠ worker unresponsive"
+
+		case state == WorkerProcessing:
+			style = lipgloss.NewStyle().
+				Background(ColorBgHighlight).
+				Foreground(ColorInfo).
+				Bold(true).
+				Padding(0, 1)
+			frame := workerSpinnerFrames[m.workerSpinnerIdx%len(workerSpinnerFrames)]
+			text = fmt.Sprintf("%s refreshing", frame)
+
+		case lastErr != nil && lastErr.Retries >= freshnessErrorRetries:
+			style = lipgloss.NewStyle().
+				Background(ColorPrioCriticalBg).
+				Foreground(ColorPrioCritical).
+				Bold(true).
+				Padding(0, 1)
+			text = fmt.Sprintf("✗ bg %s (%dx)", lastErr.Phase, lastErr.Retries)
+
+		case lastErr != nil:
+			style = lipgloss.NewStyle().
+				Background(ColorBgHighlight).
+				Foreground(ColorWarning).
+				Bold(true).
+				Padding(0, 1)
+			text = fmt.Sprintf("⚠ bg %s (%s)", lastErr.Phase, formatAge(time.Since(lastErr.Time)))
+
+		case hasSnapshotAge && snapshotAge >= freshnessStaleThreshold():
+			style = lipgloss.NewStyle().
+				Background(ColorBgHighlight).
+				Foreground(ColorDanger).
+				Bold(true).
+				Padding(0, 1)
+			text = fmt.Sprintf("⚠ STALE: %s ago", formatAge(snapshotAge))
+
+		case hasSnapshotAge && snapshotAge >= freshnessWarnThreshold():
+			style = lipgloss.NewStyle().
+				Background(ColorBgHighlight).
+				Foreground(ColorWarning).
+				Padding(0, 1)
+			text = fmt.Sprintf("⚠ %s ago", formatAge(snapshotAge))
+
+		default:
+			if health.RecoveryCount > 0 {
+				style = lipgloss.NewStyle().
+					Background(ColorBgHighlight).
+					Foreground(ColorWarning).
+					Padding(0, 1)
+				text = fmt.Sprintf("↻ recovered x%d", health.RecoveryCount)
+			} else {
+				// Fresh: no indicator.
+				text = ""
+			}
+		}
+
+		if text != "" {
+			workerSection = style.Render(text)
+		}
+	}
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// PHASE 2 PROGRESS - show while metrics are still computing (bv-tspo)
+	// ─────────────────────────────────────────────────────────────────────────
+	phase2Section := ""
+	if m.snapshot != nil && !m.snapshot.Phase2Ready {
+		phase2Style := lipgloss.NewStyle().
+			Background(ColorBgHighlight).
+			Foreground(ColorInfo).
+			Padding(0, 1)
+		phase2Section = phase2Style.Render("◌ metrics…")
+	}
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// WATCHER MODE - show polling mode when fsnotify isn't reliable (bv-3zwy)
+	// ─────────────────────────────────────────────────────────────────────────
+	watcherSection := ""
+	{
+		var (
+			polling      bool
+			fsType       watcher.FilesystemType
+			pollInterval time.Duration
+		)
+
+		switch {
+		case m.backgroundWorker != nil:
+			polling, fsType, pollInterval = m.backgroundWorker.WatcherInfo()
+		case m.watcher != nil:
+			polling = m.watcher.IsPolling()
+			fsType = m.watcher.FilesystemType()
+			pollInterval = m.watcher.PollInterval()
+		}
+
+		if polling {
+			watcherStyle := lipgloss.NewStyle().
+				Background(ColorBgHighlight).
+				Foreground(ColorMuted).
+				Padding(0, 1)
+			label := "polling"
+			if fsType != watcher.FSTypeUnknown && fsType != watcher.FSTypeLocal {
+				label = fmt.Sprintf("polling %s", fsType.String())
+			}
+			if pollInterval > 0 {
+				label = fmt.Sprintf("%s %s", label, pollInterval.String())
+			}
+			watcherSection = watcherStyle.Render(label)
+		}
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -4976,11 +5638,11 @@ func (m *Model) renderFooter() string {
 		if m.timeTravelMode {
 			keyHints = append(keyHints, keyStyle.Render("t")+" exit diff", keyStyle.Render("C")+" copy", keyStyle.Render("abgi")+" views", keyStyle.Render("?")+" help")
 		} else if m.isSplitView {
-			keyHints = append(keyHints, keyStyle.Render("tab")+" focus", keyStyle.Render("C")+" copy", keyStyle.Render("x")+" export", keyStyle.Render("?")+" help")
+			keyHints = append(keyHints, keyStyle.Render("tab")+" focus", keyStyle.Render("C")+" copy", keyStyle.Render("x")+" export", keyStyle.Render("Ctrl+R")+" refresh", keyStyle.Render("?")+" help")
 		} else if m.showDetails {
-			keyHints = append(keyHints, keyStyle.Render("esc")+" back", keyStyle.Render("C")+" copy", keyStyle.Render("O")+" edit", keyStyle.Render("?")+" help")
+			keyHints = append(keyHints, keyStyle.Render("esc")+" back", keyStyle.Render("C")+" copy", keyStyle.Render("O")+" edit", keyStyle.Render("Ctrl+R")+" refresh", keyStyle.Render("?")+" help")
 		} else {
-			keyHints = append(keyHints, keyStyle.Render("⏎")+" details", keyStyle.Render("t")+" diff", keyStyle.Render("S")+" triage", keyStyle.Render("l")+" labels", keyStyle.Render("?")+" help")
+			keyHints = append(keyHints, keyStyle.Render("⏎")+" details", keyStyle.Render("t")+" diff", keyStyle.Render("S")+" triage", keyStyle.Render("l")+" labels", keyStyle.Render("Ctrl+R")+" refresh", keyStyle.Render("?")+" help")
 			if m.workspaceMode {
 				keyHints = append(keyHints, keyStyle.Render("w")+" repos")
 			}
@@ -5004,6 +5666,15 @@ func (m *Model) renderFooter() string {
 	// ASSEMBLE FOOTER with proper spacing
 	// ─────────────────────────────────────────────────────────────────────────
 	leftWidth := lipgloss.Width(filterBadge) + lipgloss.Width(labelHint) + lipgloss.Width(statsSection)
+	if phase2Section != "" {
+		leftWidth += lipgloss.Width(phase2Section) + 1
+	}
+	if watcherSection != "" {
+		leftWidth += lipgloss.Width(watcherSection) + 1
+	}
+	if workerSection != "" {
+		leftWidth += lipgloss.Width(workerSection) + 1
+	}
 	if searchBadge != "" {
 		leftWidth += lipgloss.Width(searchBadge) + 1
 	}
@@ -5064,7 +5735,17 @@ func (m *Model) renderFooter() string {
 	if updateSection != "" {
 		parts = append(parts, updateSection)
 	}
-	parts = append(parts, statsSection, filler, countBadge, keysSection)
+	parts = append(parts, statsSection)
+	if phase2Section != "" {
+		parts = append(parts, phase2Section)
+	}
+	if watcherSection != "" {
+		parts = append(parts, watcherSection)
+	}
+	if workerSection != "" {
+		parts = append(parts, workerSection)
+	}
+	parts = append(parts, filler, countBadge, keysSection)
 
 	return lipgloss.JoinHorizontal(lipgloss.Bottom, parts...)
 }
@@ -5116,10 +5797,17 @@ func (m *Model) hasActiveFilters() bool {
 // clearAllFilters resets all filters to their default state
 func (m *Model) clearAllFilters() {
 	m.currentFilter = "all"
-	m.activeRecipe = nil // Clear any active recipe filter
+	m.setActiveRecipe(nil) // Clear any active recipe filter
 	// Reset the fuzzy search filter by resetting the filter state
 	m.list.ResetFilter()
 	m.applyFilter()
+}
+
+func (m *Model) setActiveRecipe(r *recipe.Recipe) {
+	m.activeRecipe = r
+	if m.backgroundWorker != nil {
+		m.backgroundWorker.SetRecipe(r)
+	}
 }
 
 func (m *Model) applyFilter() {
@@ -5197,10 +5885,18 @@ func (m *Model) applyFilter() {
 
 	m.list.SetItems(filteredItems)
 	m.updateSemanticIDs(filteredItems)
-	m.board.SetIssues(filteredIssues)
-	// Generate insights for graph view (for metric rankings and sorting)
-	filterIns := m.analysis.GenerateInsights(len(filteredIssues))
-	m.graphView.SetIssues(filteredIssues, &filterIns)
+	if m.snapshot != nil && m.snapshot.BoardState != nil && m.currentFilter == "all" && (!m.workspaceMode || m.activeRepos == nil) && len(filteredIssues) == len(m.snapshot.Issues) {
+		m.board.SetSnapshot(m.snapshot)
+	} else {
+		m.board.SetIssues(filteredIssues)
+	}
+	if m.snapshot != nil && m.snapshot.GraphLayout != nil && m.currentFilter == "all" && len(filteredIssues) == len(m.snapshot.Issues) {
+		m.graphView.SetSnapshot(m.snapshot)
+	} else {
+		// Generate insights for graph view (for metric rankings and sorting)
+		filterIns := m.analysis.GenerateInsights(len(filteredIssues))
+		m.graphView.SetIssues(filteredIssues, &filterIns)
+	}
 
 	// Keep selection in bounds
 	if len(filteredItems) > 0 && m.list.Index() >= len(filteredItems) {
@@ -5365,59 +6061,119 @@ func (m *Model) applyRecipe(r *recipe.Recipe) {
 	}
 
 	// Apply sort
+	field := r.Sort.Field
 	descending := r.Sort.Direction == "desc"
-	if r.Sort.Field != "" {
+	if field != "" {
+		compare := func(a, b model.Issue) int {
+			switch field {
+			case "priority":
+				switch {
+				case a.Priority < b.Priority:
+					return -1
+				case a.Priority > b.Priority:
+					return 1
+				default:
+					return 0
+				}
+			case "created", "created_at":
+				switch {
+				case a.CreatedAt.Before(b.CreatedAt):
+					return -1
+				case a.CreatedAt.After(b.CreatedAt):
+					return 1
+				default:
+					return 0
+				}
+			case "updated", "updated_at":
+				switch {
+				case a.UpdatedAt.Before(b.UpdatedAt):
+					return -1
+				case a.UpdatedAt.After(b.UpdatedAt):
+					return 1
+				default:
+					return 0
+				}
+			case "impact":
+				if m.analysis == nil {
+					switch {
+					case a.Priority < b.Priority:
+						return -1
+					case a.Priority > b.Priority:
+						return 1
+					default:
+						return 0
+					}
+				}
+				aScore := m.analysis.GetCriticalPathScore(a.ID)
+				bScore := m.analysis.GetCriticalPathScore(b.ID)
+				switch {
+				case aScore < bScore:
+					return -1
+				case aScore > bScore:
+					return 1
+				default:
+					return 0
+				}
+			case "pagerank":
+				if m.analysis == nil {
+					switch {
+					case a.Priority < b.Priority:
+						return -1
+					case a.Priority > b.Priority:
+						return 1
+					default:
+						return 0
+					}
+				}
+				aScore := m.analysis.GetPageRankScore(a.ID)
+				bScore := m.analysis.GetPageRankScore(b.ID)
+				switch {
+				case aScore < bScore:
+					return -1
+				case aScore > bScore:
+					return 1
+				default:
+					return 0
+				}
+			default:
+				switch {
+				case a.Priority < b.Priority:
+					return -1
+				case a.Priority > b.Priority:
+					return 1
+				default:
+					return 0
+				}
+			}
+		}
+
 		sort.Slice(filteredItems, func(i, j int) bool {
 			iItem := filteredItems[i].(IssueItem)
 			jItem := filteredItems[j].(IssueItem)
-			less := false
 
-			switch r.Sort.Field {
-			case "priority":
-				less = iItem.Issue.Priority < jItem.Issue.Priority
-			case "created", "created_at":
-				less = iItem.Issue.CreatedAt.Before(jItem.Issue.CreatedAt)
-			case "updated", "updated_at":
-				less = iItem.Issue.UpdatedAt.Before(jItem.Issue.UpdatedAt)
-			case "impact":
-				// Use analysis map for sort
-				less = m.analysis.GetCriticalPathScore(iItem.Issue.ID) < m.analysis.GetCriticalPathScore(jItem.Issue.ID)
-			case "pagerank":
-				// Use analysis map for sort
-				less = m.analysis.GetPageRankScore(iItem.Issue.ID) < m.analysis.GetPageRankScore(jItem.Issue.ID)
-			default:
-				less = iItem.Issue.Priority < jItem.Issue.Priority
+			cmp := compare(iItem.Issue, jItem.Issue)
+			if cmp == 0 {
+				return iItem.Issue.ID < jItem.Issue.ID
 			}
-
 			if descending {
-				return !less
+				return cmp > 0
 			}
-			return less
+			return cmp < 0
 		})
 
 		// Re-sort issues list too
 		sort.Slice(filteredIssues, func(i, j int) bool {
-			less := false
-			switch r.Sort.Field {
-			case "priority":
-				less = filteredIssues[i].Priority < filteredIssues[j].Priority
-			case "created", "created_at":
-				less = filteredIssues[i].CreatedAt.Before(filteredIssues[j].CreatedAt)
-			case "updated", "updated_at":
-				less = filteredIssues[i].UpdatedAt.Before(filteredIssues[j].UpdatedAt)
-			case "impact":
-				// Use analysis map for sort
-				less = m.analysis.GetCriticalPathScore(filteredIssues[i].ID) < m.analysis.GetCriticalPathScore(filteredIssues[j].ID)
-			case "pagerank":
-				// Use analysis map for sort
-				less = m.analysis.GetPageRankScore(filteredIssues[i].ID) < m.analysis.GetPageRankScore(filteredIssues[j].ID)
-			default:
-				less = filteredIssues[i].Priority < filteredIssues[j].Priority
+			ii := filteredIssues[i]
+			jj := filteredIssues[j]
+
+			cmp := compare(ii, jj)
+			if cmp == 0 {
+				return ii.ID < jj.ID
 			}
 			if descending {
-				return !less
+				return cmp > 0
 			}
-			return less
+			return cmp < 0
 		})
 	}
 

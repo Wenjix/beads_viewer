@@ -433,8 +433,9 @@ func TestViewSwitchingPerformance(t *testing.T) {
 
 	elapsed := time.Since(start)
 
-	// Should complete in under 1 second (generous threshold for CI)
-	if elapsed > time.Second {
+	// Should complete quickly, but allow some headroom when `go test ./...` runs
+	// packages in parallel and the machine is under load.
+	if elapsed > 2*time.Second {
 		t.Errorf("View switching too slow: %v for 600 switches", elapsed)
 	}
 }
