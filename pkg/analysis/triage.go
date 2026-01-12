@@ -10,6 +10,10 @@ import (
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
 )
 
+func isClosedLikeStatus(status model.Status) bool {
+	return status == model.StatusClosed || status == model.StatusTombstone
+}
+
 // TriageResult is the unified output for --robot-triage
 // Designed as a single entry point for AI agents to get everything they need
 type TriageResult struct {
@@ -182,10 +186,10 @@ func ComputeProjectVelocity(issues []model.Issue, now time.Time, weeks int) *Vel
 		}
 
 		// Count rolling windows
-		if closedAt.After(weekAgo) {
+		if !closedAt.Before(weekAgo) {
 			closedLast7++
 		}
-		if closedAt.After(monthAgo) {
+		if !closedAt.Before(monthAgo) {
 			closedLast30++
 		}
 
@@ -272,10 +276,10 @@ type Alert struct {
 
 // CommandHelpers provides copy-paste commands for common actions
 type CommandHelpers struct {
-	ClaimTop      string `json:"claim_top"`      // bd update <id> --status=in_progress
-	ShowTop       string `json:"show_top"`       // bd show <id>
-	ListReady     string `json:"list_ready"`     // bd ready
-	ListBlocked   string `json:"list_blocked"`   // bd blocked
+	ClaimTop      string `json:"claim_top"`      // CI=1 bd update <id> --status in_progress --json
+	ShowTop       string `json:"show_top"`       // CI=1 bd show <id> --json
+	ListReady     string `json:"list_ready"`     // CI=1 bd ready --json
+	ListBlocked   string `json:"list_blocked"`   // CI=1 bd blocked --json
 	RefreshTriage string `json:"refresh_triage"` // bv --robot-triage
 }
 
@@ -302,7 +306,7 @@ type TrackRecommendationGroup struct {
 	Reason          string           `json:"reason"`                  // Why these are grouped (e.g., "Independent work stream")
 	Recommendations []Recommendation `json:"recommendations"`         // Recommendations in this track
 	TopPick         *TopPick         `json:"top_pick,omitempty"`      // Best item in this track
-	ClaimCommand    string           `json:"claim_command,omitempty"` // bd update <top_pick_id> --status=in_progress
+	ClaimCommand    string           `json:"claim_command,omitempty"` // CI=1 bd update <top_pick_id> --status in_progress --json
 	TotalUnblocks   int              `json:"total_unblocks"`          // Sum of unblocks in this track
 }
 
@@ -311,7 +315,7 @@ type LabelRecommendationGroup struct {
 	Label           string           `json:"label"`
 	Recommendations []Recommendation `json:"recommendations"`         // Recommendations with this label
 	TopPick         *TopPick         `json:"top_pick,omitempty"`      // Best item with this label
-	ClaimCommand    string           `json:"claim_command,omitempty"` // bd update <top_pick_id> --status=in_progress
+	ClaimCommand    string           `json:"claim_command,omitempty"` // CI=1 bd update <top_pick_id> --status in_progress --json
 	TotalUnblocks   int              `json:"total_unblocks"`          // Sum of unblocks for this label
 }
 
@@ -364,14 +368,18 @@ func ComputeTriageFromAnalyzer(analyzer *Analyzer, stats *GraphStats, issues []m
 		opts.BlockerN = 5
 	}
 
+	// Create TriageContext for unified caching (bv-oko3)
+	// This caches actionable issues, blocker depths, etc. across all sub-functions
+	triageCtx := NewTriageContext(analyzer)
+
 	// Compute impact scores using the already-computed stats
 	impactScores := analyzer.ComputeImpactScoresFromStats(stats, now)
 
 	// Build unblocks map
 	unblocksMap := buildUnblocksMap(analyzer, issues)
 
-	// Compute counts
-	counts := computeCounts(issues, analyzer)
+	// Compute counts (uses cached actionable issues)
+	counts := computeCountsWithContext(issues, triageCtx)
 
 	// Compute enhanced triage scores (bv-147)
 	triageScores := computeTriageScoresFromImpact(impactScores, unblocksMap, analyzer, DefaultTriageScoringOptions())
@@ -382,8 +390,8 @@ func ComputeTriageFromAnalyzer(analyzer *Analyzer, stats *GraphStats, issues []m
 	// Build quick wins
 	quickWins := buildQuickWins(impactScores, unblocksMap, opts.QuickWinN)
 
-	// Build blockers to clear
-	blockersToClear := buildBlockersToClear(analyzer, unblocksMap, opts.BlockerN)
+	// Build blockers to clear (uses cached actionable issues)
+	blockersToClear := buildBlockersToClearWithContext(triageCtx, unblocksMap, opts.BlockerN)
 
 	// Build top picks for quick ref
 	topPicks := buildTopPicks(recommendations, 3)
@@ -446,7 +454,7 @@ func buildUnblocksMap(analyzer *Analyzer, issues []model.Issue) map[string][]str
 	// - Missing blockers don't block (ignore deps whose target isn't in issueMap).
 	// - Duplicate deps must not double-count (graph edges are unique).
 	// - Closing blocker B unblocks dependent D iff all other existing blocking deps of D are closed.
-	// - Closed dependents are ignored.
+	// - Closed/tombstone dependents are ignored.
 	// - Result slices are sorted for determinism.
 
 	issueByID := analyzer.issueMap
@@ -457,7 +465,7 @@ func buildUnblocksMap(analyzer *Analyzer, issues []model.Issue) map[string][]str
 	openBlockerCount := make(map[string]int, len(issues))
 
 	for _, dependent := range issues {
-		if dependent.Status == model.StatusClosed {
+		if isClosedLikeStatus(dependent.Status) {
 			continue
 		}
 		if len(dependent.Dependencies) == 0 {
@@ -483,7 +491,7 @@ func buildUnblocksMap(analyzer *Analyzer, issues []model.Issue) map[string][]str
 			seen[blockerID] = struct{}{}
 
 			dependentsByBlocker[blockerID] = append(dependentsByBlocker[blockerID], dependent.ID)
-			if blocker.Status != model.StatusClosed {
+			if !isClosedLikeStatus(blocker.Status) {
 				openBlockerCount[dependent.ID]++
 			}
 		}
@@ -491,14 +499,14 @@ func buildUnblocksMap(analyzer *Analyzer, issues []model.Issue) map[string][]str
 
 	unblocksMap := make(map[string][]string, len(issues))
 	for _, blocker := range issues {
-		if blocker.Status == model.StatusClosed {
+		if isClosedLikeStatus(blocker.Status) {
 			continue
 		}
 
 		var unblocks []string
 		for _, dependentID := range dependentsByBlocker[blocker.ID] {
 			depIssue, ok := issueByID[dependentID]
-			if !ok || depIssue.Status == model.StatusClosed {
+			if !ok || isClosedLikeStatus(depIssue.Status) {
 				continue
 			}
 			if openBlockerCount[dependentID] == 1 {
@@ -514,6 +522,7 @@ func buildUnblocksMap(analyzer *Analyzer, issues []model.Issue) map[string][]str
 }
 
 // computeCounts tallies issues by various dimensions
+// Deprecated: Use computeCountsWithContext for better performance via caching.
 func computeCounts(issues []model.Issue, analyzer *Analyzer) HealthCounts {
 	counts := HealthCounts{
 		Total:      len(issues),
@@ -533,11 +542,42 @@ func computeCounts(issues []model.Issue, analyzer *Analyzer) HealthCounts {
 		counts.ByType[string(issue.IssueType)]++
 		counts.ByPriority[issue.Priority]++
 
-		if issue.Status == model.StatusClosed {
+		if isClosedLikeStatus(issue.Status) {
 			counts.Closed++
 		} else {
 			counts.Open++
 			if actionableSet[issue.ID] {
+				counts.Actionable++
+			} else {
+				counts.Blocked++
+			}
+		}
+	}
+
+	return counts
+}
+
+// computeCountsWithContext tallies issues by various dimensions using cached actionable data.
+// This is more efficient than computeCounts when called multiple times in the same triage pass.
+func computeCountsWithContext(issues []model.Issue, ctx *TriageContext) HealthCounts {
+	counts := HealthCounts{
+		Total:      len(issues),
+		ByStatus:   make(map[string]int),
+		ByType:     make(map[string]int),
+		ByPriority: make(map[int]int),
+	}
+
+	for _, issue := range issues {
+		counts.ByStatus[string(issue.Status)]++
+		counts.ByType[string(issue.IssueType)]++
+		counts.ByPriority[issue.Priority]++
+
+		if isClosedLikeStatus(issue.Status) {
+			counts.Closed++
+		} else {
+			counts.Open++
+			// Use cached IsActionable lookup - O(1) after first computation
+			if ctx.IsActionable(issue.ID) {
 				counts.Actionable++
 			} else {
 				counts.Blocked++
@@ -663,6 +703,7 @@ func buildQuickWins(scores []ImpactScore, unblocksMap map[string][]string, limit
 }
 
 // buildBlockersToClear finds items that block the most downstream work
+// Deprecated: Use buildBlockersToClearWithContext for better performance via caching.
 func buildBlockersToClear(analyzer *Analyzer, unblocksMap map[string][]string, limit int) []BlockerItem {
 	type blocker struct {
 		id       string
@@ -682,7 +723,7 @@ func buildBlockersToClear(analyzer *Analyzer, unblocksMap map[string][]string, l
 			continue
 		}
 		issue := analyzer.GetIssue(id)
-		if issue == nil || issue.Status == model.StatusClosed {
+		if issue == nil || isClosedLikeStatus(issue.Status) {
 			continue
 		}
 		blockers = append(blockers, blocker{
@@ -713,6 +754,59 @@ func buildBlockersToClear(analyzer *Analyzer, unblocksMap map[string][]string, l
 		}
 		if !item.Actionable {
 			item.BlockedBy = analyzer.GetOpenBlockers(b.id)
+		}
+		result = append(result, item)
+	}
+
+	return result
+}
+
+// buildBlockersToClearWithContext finds items that block the most downstream work.
+// This version uses TriageContext for cached actionable lookups and open blockers.
+func buildBlockersToClearWithContext(ctx *TriageContext, unblocksMap map[string][]string, limit int) []BlockerItem {
+	type blocker struct {
+		id       string
+		title    string
+		unblocks []string
+	}
+
+	var blockers []blocker
+	for id, unblocks := range unblocksMap {
+		if len(unblocks) == 0 {
+			continue
+		}
+		issue := ctx.GetIssue(id)
+		if issue == nil || isClosedLikeStatus(issue.Status) {
+			continue
+		}
+		blockers = append(blockers, blocker{
+			id:       id,
+			title:    issue.Title,
+			unblocks: unblocks,
+		})
+	}
+
+	// Sort by unblocks count descending
+	sort.Slice(blockers, func(i, j int) bool {
+		if len(blockers[i].unblocks) != len(blockers[j].unblocks) {
+			return len(blockers[i].unblocks) > len(blockers[j].unblocks)
+		}
+		// Stable tie-breaker for deterministic robot output.
+		return blockers[i].id < blockers[j].id
+	})
+
+	result := make([]BlockerItem, 0, limit)
+	for i := 0; i < len(blockers) && i < limit; i++ {
+		b := blockers[i]
+		item := BlockerItem{
+			ID:            b.id,
+			Title:         b.title,
+			UnblocksCount: len(b.unblocks),
+			UnblocksIDs:   b.unblocks,
+			Actionable:    ctx.IsActionable(b.id), // Cached O(1) lookup
+		}
+		if !item.Actionable {
+			item.BlockedBy = ctx.OpenBlockers(b.id) // Cached O(1) lookup
 		}
 		result = append(result, item)
 	}
@@ -761,18 +855,22 @@ func buildGraphHealth(stats *GraphStats) GraphHealth {
 
 // buildCommands constructs helper commands, handling empty topID gracefully
 func buildCommands(topID string) CommandHelpers {
-	claimTop := "bd ready  # No top pick available"
-	showTop := "bd ready  # No top pick available"
+	base := "CI=1 "
+	listReady := base + "bd ready --json"
+	listBlocked := base + "bd blocked --json"
+
+	claimTop := listReady + "  # No top pick available"
+	showTop := listReady + "  # No top pick available"
 	if topID != "" {
-		claimTop = fmt.Sprintf("bd update %s --status=in_progress", topID)
-		showTop = fmt.Sprintf("bd show %s", topID)
+		claimTop = fmt.Sprintf("%sbd update %s --status in_progress --json", base, topID)
+		showTop = fmt.Sprintf("%sbd show %s --json", base, topID)
 	}
 
 	return CommandHelpers{
 		ClaimTop:      claimTop,
 		ShowTop:       showTop,
-		ListReady:     "bd ready",
-		ListBlocked:   "bd blocked",
+		ListReady:     listReady,
+		ListBlocked:   listBlocked,
 		RefreshTriage: "bv --robot-triage",
 	}
 }
@@ -1316,7 +1414,7 @@ func buildRecommendationsByTrack(recs []Recommendation, analyzer *Analyzer, unbl
 				Reasons:  rec.Reasons,
 				Unblocks: len(unblocksMap[rec.ID]),
 			}
-			group.ClaimCommand = fmt.Sprintf("bd update %s --status=in_progress", rec.ID)
+			group.ClaimCommand = fmt.Sprintf("CI=1 bd update %s --status in_progress --json", rec.ID)
 		}
 	}
 
@@ -1360,7 +1458,7 @@ func buildRecommendationsByLabel(recs []Recommendation, unblocksMap map[string][
 				Reasons:  rec.Reasons,
 				Unblocks: len(unblocksMap[rec.ID]),
 			}
-			group.ClaimCommand = fmt.Sprintf("bd update %s --status=in_progress", rec.ID)
+			group.ClaimCommand = fmt.Sprintf("CI=1 bd update %s --status in_progress --json", rec.ID)
 		}
 	}
 
