@@ -33,7 +33,35 @@
   </table>
 </div>
 
-### ⚡ Quick Install
+## Installation
+
+### Recommended: Homebrew (macOS/Linux)
+
+```bash
+brew install dicklesworthstone/tap/bv
+```
+
+This method provides:
+- Automatic updates via `brew upgrade`
+- Dependency management
+- Easy uninstall via `brew uninstall`
+
+### Windows: Scoop
+
+```powershell
+scoop bucket add dicklesworthstone https://github.com/Dicklesworthstone/scoop-bucket
+scoop install dicklesworthstone/bv
+```
+
+### Alternative: Direct Download
+
+Download the latest release for your platform:
+- [Linux x86_64](https://github.com/Dicklesworthstone/beads_viewer/releases/latest/download/bv-linux-amd64)
+- [macOS Intel](https://github.com/Dicklesworthstone/beads_viewer/releases/latest/download/bv-darwin-amd64)
+- [macOS ARM](https://github.com/Dicklesworthstone/beads_viewer/releases/latest/download/bv-darwin-arm64)
+- [Windows](https://github.com/Dicklesworthstone/beads_viewer/releases/latest/download/bv-windows-amd64.exe)
+
+### Alternative: Install Script
 
 **Linux/macOS:**
 ```bash

@@ -552,6 +552,9 @@ main() {
     # First, try to download pre-built binary
     if try_binary_install "$platform"; then
         print_info "Run '$BIN_NAME' in any beads project to view issues."
+        echo ""
+        echo "Tip: You can also install via Homebrew:"
+        echo "  brew install dicklesworthstone/tap/bv"
         exit 0
     fi
 
@@ -560,6 +563,9 @@ main() {
     try_go_install
 
     print_info "Run '$BIN_NAME' in any beads project to view issues."
+    echo ""
+    echo "Tip: You can also install via Homebrew:"
+    echo "  brew install dicklesworthstone/tap/bv"
 }
 
 if [[ ${BASH_SOURCE+x} != x ]]; then
