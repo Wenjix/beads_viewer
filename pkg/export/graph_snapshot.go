@@ -257,13 +257,15 @@ func buildLayout(opts GraphSnapshotOptions) layoutResult {
 func topByMetric(m map[string]float64) string {
 	var bestID string
 	var bestVal float64
+	hasBest := false
 	for id, v := range m {
-		if v > bestVal || (v == bestVal && id < bestID) {
+		if !hasBest || v > bestVal || (v == bestVal && id < bestID) {
 			bestID = id
 			bestVal = v
+			hasBest = true
 		}
 	}
-	if bestID == "" {
+	if !hasBest {
 		return "n/a"
 	}
 	return fmt.Sprintf("%s (%.2f)", bestID, bestVal)
