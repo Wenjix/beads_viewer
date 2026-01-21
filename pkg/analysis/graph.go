@@ -951,9 +951,222 @@ func pruneIncrementalGraphStatsCacheLocked(now time.Time) {
 	}
 }
 
+// directedGraph captures the graph capabilities needed by the analyzer.
+// Gonum's graph.Directed interface doesn't include Edges(), so we add it here.
+type directedGraph interface {
+	graph.Directed
+	Edges() graph.Edges
+}
+
+// compactDirectedGraph is a low-allocation directed graph optimized for
+// immutable analysis workloads. It uses adjacency lists instead of map-backed
+// edge sets to reduce allocation overhead during graph construction.
+type compactDirectedGraph struct {
+	nodes     []graph.Node
+	out       [][]int64
+	in        [][]int64
+	edgeCount int
+}
+
+func newCompactDirectedGraph(nodeCount int) *compactDirectedGraph {
+	nodes := make([]graph.Node, nodeCount)
+	for i := range nodes {
+		nodes[i] = simple.Node(int64(i))
+	}
+	return &compactDirectedGraph{
+		nodes: nodes,
+		out:   make([][]int64, nodeCount),
+		in:    make([][]int64, nodeCount),
+	}
+}
+
+func (g *compactDirectedGraph) addEdge(from, to int64) {
+	if from < 0 || to < 0 {
+		return
+	}
+	if int(from) >= len(g.nodes) || int(to) >= len(g.nodes) {
+		return
+	}
+	g.out[from] = append(g.out[from], to)
+	g.in[to] = append(g.in[to], from)
+	g.edgeCount++
+}
+
+func (g *compactDirectedGraph) Node(id int64) graph.Node {
+	if id < 0 || int(id) >= len(g.nodes) {
+		return nil
+	}
+	return g.nodes[id]
+}
+
+func (g *compactDirectedGraph) Nodes() graph.Nodes {
+	if len(g.nodes) == 0 {
+		return graph.Empty
+	}
+	return &compactNodes{nodes: g.nodes, idx: -1}
+}
+
+func (g *compactDirectedGraph) From(id int64) graph.Nodes {
+	if id < 0 || int(id) >= len(g.out) {
+		return graph.Empty
+	}
+	ids := g.out[id]
+	if len(ids) == 0 {
+		return graph.Empty
+	}
+	return &compactIDNodes{nodes: g.nodes, ids: ids, idx: -1}
+}
+
+func (g *compactDirectedGraph) To(id int64) graph.Nodes {
+	if id < 0 || int(id) >= len(g.in) {
+		return graph.Empty
+	}
+	ids := g.in[id]
+	if len(ids) == 0 {
+		return graph.Empty
+	}
+	return &compactIDNodes{nodes: g.nodes, ids: ids, idx: -1}
+}
+
+func (g *compactDirectedGraph) HasEdgeFromTo(uid, vid int64) bool {
+	if uid < 0 || int(uid) >= len(g.out) {
+		return false
+	}
+	for _, to := range g.out[uid] {
+		if to == vid {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *compactDirectedGraph) HasEdgeBetween(xid, yid int64) bool {
+	return g.HasEdgeFromTo(xid, yid) || g.HasEdgeFromTo(yid, xid)
+}
+
+func (g *compactDirectedGraph) Edge(uid, vid int64) graph.Edge {
+	if !g.HasEdgeFromTo(uid, vid) {
+		return nil
+	}
+	if uid < 0 || vid < 0 || int(uid) >= len(g.nodes) || int(vid) >= len(g.nodes) {
+		return nil
+	}
+	return simple.Edge{F: g.nodes[uid], T: g.nodes[vid]}
+}
+
+func (g *compactDirectedGraph) Edges() graph.Edges {
+	if g.edgeCount == 0 {
+		return graph.Empty
+	}
+	return &compactEdges{g: g, fromIdx: 0, toIdx: -1}
+}
+
+type compactNodes struct {
+	nodes []graph.Node
+	idx   int
+}
+
+func (it *compactNodes) Next() bool {
+	if it.idx+1 >= len(it.nodes) {
+		return false
+	}
+	it.idx++
+	return true
+}
+
+func (it *compactNodes) Node() graph.Node {
+	if it.idx < 0 || it.idx >= len(it.nodes) {
+		return nil
+	}
+	return it.nodes[it.idx]
+}
+
+func (it *compactNodes) Len() int {
+	return len(it.nodes)
+}
+
+func (it *compactNodes) Reset() {
+	it.idx = -1
+}
+
+type compactIDNodes struct {
+	nodes []graph.Node
+	ids   []int64
+	idx   int
+}
+
+func (it *compactIDNodes) Next() bool {
+	if it.idx+1 >= len(it.ids) {
+		return false
+	}
+	it.idx++
+	return true
+}
+
+func (it *compactIDNodes) Node() graph.Node {
+	if it.idx < 0 || it.idx >= len(it.ids) {
+		return nil
+	}
+	id := it.ids[it.idx]
+	if id < 0 || int(id) >= len(it.nodes) {
+		return nil
+	}
+	return it.nodes[id]
+}
+
+func (it *compactIDNodes) Len() int {
+	return len(it.ids)
+}
+
+func (it *compactIDNodes) Reset() {
+	it.idx = -1
+}
+
+type compactEdges struct {
+	g       *compactDirectedGraph
+	fromIdx int
+	toIdx   int
+}
+
+func (it *compactEdges) Next() bool {
+	for it.fromIdx < len(it.g.out) {
+		it.toIdx++
+		if it.toIdx < len(it.g.out[it.fromIdx]) {
+			return true
+		}
+		it.fromIdx++
+		it.toIdx = -1
+	}
+	return false
+}
+
+func (it *compactEdges) Edge() graph.Edge {
+	if it.fromIdx < 0 || it.fromIdx >= len(it.g.out) {
+		return nil
+	}
+	if it.toIdx < 0 || it.toIdx >= len(it.g.out[it.fromIdx]) {
+		return nil
+	}
+	toID := it.g.out[it.fromIdx][it.toIdx]
+	if toID < 0 || int(toID) >= len(it.g.nodes) {
+		return nil
+	}
+	fromID := int64(it.fromIdx)
+	return simple.Edge{F: it.g.nodes[fromID], T: it.g.nodes[toID]}
+}
+
+func (it *compactEdges) Len() int {
+	return it.g.edgeCount
+}
+
+func (it *compactEdges) Reset() {
+	it.fromIdx = 0
+	it.toIdx = -1
+}
+
 // Analyzer encapsulates the graph logic
 type Analyzer struct {
-	g        *simple.DirectedGraph
+	g        directedGraph
 	idToNode map[string]int64
 	nodeToID map[int64]string
 	issueMap map[string]model.Issue
@@ -1027,28 +1240,33 @@ func (a *Analyzer) graphStructureHash() string {
 }
 
 func NewAnalyzer(issues []model.Issue) *Analyzer {
-	g := simple.NewDirectedGraph()
+	g := newCompactDirectedGraph(len(issues))
 	// Pre-allocate maps for efficiency
 	idToNode := make(map[string]int64, len(issues))
 	nodeToID := make(map[int64]string, len(issues))
 	issueMap := make(map[string]model.Issue, len(issues))
 
 	// 1. Add Nodes
-	for _, issue := range issues {
+	for idx, issue := range issues {
 		issueMap[issue.ID] = issue
-		n := g.NewNode()
-		g.AddNode(n)
-		idToNode[issue.ID] = n.ID()
-		nodeToID[n.ID()] = issue.ID
+		nodeID := int64(idx)
+		idToNode[issue.ID] = nodeID
+		nodeToID[nodeID] = issue.ID
 	}
 
 	// 2. Add Edges (Dependency Direction)
 	// We only model *blocking* relationships in the analysis graph. Non-blocking
 	// links such as "related" should not influence centrality metrics or cycle
 	// detection because they do not gate execution order.
+	seenByBlocker := make(map[int64]int, len(issues))
+	epoch := 0
 	for _, issue := range issues {
+		epoch++
 		u, ok := idToNode[issue.ID]
 		if !ok {
+			continue
+		}
+		if len(issue.Dependencies) == 0 {
 			continue
 		}
 
@@ -1063,11 +1281,16 @@ func NewAnalyzer(issues []model.Issue) *Analyzer {
 			}
 
 			v, exists := idToNode[dep.DependsOnID]
-			if exists {
-				// Issue (u) depends on v → edge u -> v
-				// Optimization: Use simple.Node directly to avoid internal map lookups in g.Node()
-				g.SetEdge(g.NewEdge(simple.Node(u), simple.Node(v)))
+			if !exists {
+				continue
 			}
+			if seenByBlocker[v] == epoch {
+				continue
+			}
+			seenByBlocker[v] = epoch
+
+			// Issue (u) depends on v → edge u -> v
+			g.addEdge(u, v)
 		}
 	}
 
@@ -1773,7 +1996,7 @@ type undirectedAdjacency struct {
 	neighbors [][]int64
 }
 
-func newUndirectedAdjacency(g *simple.DirectedGraph) undirectedAdjacency {
+func newUndirectedAdjacency(g directedGraph) undirectedAdjacency {
 	nodesIt := g.Nodes()
 	nodes := make([]int64, 0, nodesIt.Len())
 	var maxID int64
