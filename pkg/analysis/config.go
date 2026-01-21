@@ -264,6 +264,37 @@ func TriageConfig() AnalysisConfig {
 	return ApplyEnvOverrides(cfg)
 }
 
+// AllPhase2Disabled returns true if all Phase 2 metrics are disabled.
+// When this returns true, the Phase 2 goroutine can be skipped entirely.
+func (c AnalysisConfig) AllPhase2Disabled() bool {
+	return !c.ComputeBetweenness &&
+		!c.ComputePageRank &&
+		!c.ComputeHITS &&
+		!c.ComputeCycles &&
+		!c.ComputeEigenvector &&
+		!c.ComputeCriticalPath &&
+		!c.ComputeKCore &&
+		!c.ComputeArticulation &&
+		!c.ComputeSlack
+}
+
+// NoPhase2Config returns a config with all Phase 2 metrics disabled.
+// Use this when Phase 2 metrics are not needed (e.g., all issues closed).
+func NoPhase2Config() AnalysisConfig {
+	return AnalysisConfig{
+		// All Phase 2 metrics disabled
+		ComputeBetweenness:  false,
+		ComputePageRank:     false,
+		ComputeHITS:         false,
+		ComputeCycles:       false,
+		ComputeEigenvector:  false,
+		ComputeCriticalPath: false,
+		ComputeKCore:        false,
+		ComputeArticulation: false,
+		ComputeSlack:        false,
+	}
+}
+
 // SkippedMetrics returns a list of metrics that are configured to be skipped.
 func (c AnalysisConfig) SkippedMetrics() []SkippedMetric {
 	var skipped []SkippedMetric

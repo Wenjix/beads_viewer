@@ -346,8 +346,12 @@ func ComputeTriageWithOptionsAndTime(issues []model.Issue, opts TriageOptions, n
 	}
 
 	// Use fast config for triage-only analysis (bv-t1js optimization)
+	// bv-perf: When no open issues, use NoPhase2Config to skip the goroutine entirely.
 	var stats *GraphStats
-	if opts.UseFastConfig {
+	if !hasOpenIssues {
+		// All issues closed - skip Phase 2 completely (no scoring needed)
+		stats = analyzer.AnalyzeAsyncWithConfig(context.Background(), NoPhase2Config())
+	} else if opts.UseFastConfig {
 		stats = analyzer.AnalyzeAsyncWithConfig(context.Background(), TriageConfig())
 	} else {
 		stats = analyzer.AnalyzeAsync(context.Background())

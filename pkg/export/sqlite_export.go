@@ -80,7 +80,9 @@ func (e *SQLiteExporter) Export(outputDir string) error {
 	dbPath := filepath.Join(outputDir, "beads.sqlite3")
 
 	// Remove existing database if present
-	_ = os.Remove(dbPath)
+	if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove existing database: %w", err)
+	}
 
 	// Open database
 	db, err := sql.Open("sqlite", dbPath)

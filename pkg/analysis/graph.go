@@ -1181,6 +1181,26 @@ func (a *Analyzer) AnalyzeAsyncWithConfig(ctx context.Context, config AnalysisCo
 		putIncrementalGraphStatsCache(incCacheKey, stats)
 	}
 
+	// bv-perf: Skip Phase 2 entirely when all metrics are disabled.
+	// This avoids goroutine overhead when Phase 2 results aren't needed
+	// (e.g., all issues are closed, so no triage scoring required).
+	if config.AllPhase2Disabled() {
+		stats.status = MetricStatus{
+			PageRank:     statusEntry{State: "skipped", Reason: "all phase 2 disabled"},
+			Betweenness:  statusEntry{State: "skipped", Reason: "all phase 2 disabled"},
+			Eigenvector:  statusEntry{State: "skipped", Reason: "all phase 2 disabled"},
+			HITS:         statusEntry{State: "skipped", Reason: "all phase 2 disabled"},
+			Critical:     statusEntry{State: "skipped", Reason: "all phase 2 disabled"},
+			Cycles:       statusEntry{State: "skipped", Reason: "all phase 2 disabled"},
+			KCore:        statusEntry{State: "skipped", Reason: "all phase 2 disabled"},
+			Articulation: statusEntry{State: "skipped", Reason: "all phase 2 disabled"},
+			Slack:        statusEntry{State: "skipped", Reason: "all phase 2 disabled"},
+		}
+		stats.phase2Ready = true
+		close(stats.phase2Done)
+		return stats
+	}
+
 	// Phase 2: Expensive metrics in background goroutine
 	go a.computePhase2(ctx, stats, config, robotCacheKey, dataHash, configHash)
 
