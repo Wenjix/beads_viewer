@@ -319,8 +319,9 @@ func (od *OrphanDetector) checkFiles(candidate *OrphanCandidate, beadScores map[
 	for _, file := range candidate.Files {
 		result := od.fileLookup.LookupByFile(file)
 
-		// Check both open and closed beads that touched this file
-		allRefs := append(result.OpenBeads, result.ClosedBeads...)
+		// Check both open and closed beads that touched this file.
+		// Use three-index slice to prevent modifying result.OpenBeads' underlying array.
+		allRefs := append(result.OpenBeads[:len(result.OpenBeads):len(result.OpenBeads)], result.ClosedBeads...)
 		for _, ref := range allRefs {
 			weight := 25 // Base weight for file overlap
 
