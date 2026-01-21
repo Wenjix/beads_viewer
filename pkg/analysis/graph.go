@@ -1261,7 +1261,7 @@ func NewAnalyzer(issues []model.Issue) *Analyzer {
 	// We only model *blocking* relationships in the analysis graph. Non-blocking
 	// links such as "related" should not influence centrality metrics or cycle
 	// detection because they do not gate execution order.
-	seenByBlocker := make(map[int64]int, len(issues))
+	seenByBlocker := make([]int, len(issues))
 	epoch := 0
 	for _, issue := range issues {
 		epoch++
@@ -1288,9 +1288,10 @@ func NewAnalyzer(issues []model.Issue) *Analyzer {
 				continue
 			}
 			// Count all blocking dependencies (including duplicates) for impact scoring.
-			if v >= 0 && int(v) < len(blockerCounts) {
-				blockerCounts[v]++
+			if v < 0 || int(v) >= len(blockerCounts) {
+				continue
 			}
+			blockerCounts[v]++
 			if seenByBlocker[v] == epoch {
 				continue
 			}
