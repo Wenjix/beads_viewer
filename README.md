@@ -571,7 +571,7 @@ flowchart LR
 ### 2. Zero-Latency Virtualization
 Rendering 10,000 issues would choke a naive terminal app. `bv` implements **Viewport Virtualization**:
 *   **Windowing:** We only render the slice of rows currently visible in the terminal window.
-*   **Pre-Computation:** Graph metrics (PageRank, etc.) are computed *once* at startup in a separate goroutine, not on every frame.
+*   **Pre-Computation:** Graph metrics (PageRank, etc.) are computed *once* at startup in a separate goroutine, not on every frame. The underlying graph uses a compact adjacency-list implementation that's 50-100× faster than naive map-backed approaches.
 *   **Detail Caching:** The Markdown renderer is instantiated lazily and reused, avoiding expensive regex recompilation.
 
 ### 3. Visual Graph Engine (`pkg/ui/graph.go`)
@@ -3434,6 +3434,25 @@ All expensive algorithms (Betweenness, PageRank, HITS, Cycle detection) have 500
 
 **Detailed Tuning Guide:**
 For comprehensive performance documentation including troubleshooting, size-based algorithm selection, and tuning options, see [docs/performance.md](docs/performance.md).
+
+### Graph Engine Optimization
+
+The analysis engine uses a **compact adjacency-list graph** (`compactDirectedGraph`) instead of the standard Gonum map-backed implementation. This optimization delivers significant performance improvements:
+
+| Benchmark (696 issues) | Before | After | Improvement |
+|------------------------|--------|-------|-------------|
+| Full Triage | 67ms | 1.3ms | **52× faster** |
+| Full Analysis | 46ms | 477μs | **96× faster** |
+| Graph Build | 1.2ms | 323μs | **3.7× faster** |
+| Memory (Graph Build) | 735KB | 444KB | **40% less** |
+| Allocations | 4,647 | 2,512 | **46% fewer** |
+
+**Why it matters:** The default Gonum `DirectedGraph` uses map-backed edge sets, which cause heavy allocations during graph construction. Our compact implementation:
+- Pre-allocates node arrays at known size
+- Uses `[]int64` adjacency lists instead of `map[int64]set`
+- Eliminates map grow/rehash overhead entirely
+
+**Real-data benchmarks:** Run `go test -bench=BenchmarkRealData ./pkg/analysis/...` to validate performance against your project's actual `.beads/issues.jsonl` data.
 
 ---
 
