@@ -4071,6 +4071,21 @@ func (m Model) handleListKeys(msg tea.KeyMsg) Model {
 	case "U":
 		// Show self-update modal (bv-182)
 		m.showSelfUpdateModal()
+	case "y":
+		// Copy ID to clipboard (consistent with board view - bv-yg39)
+		selectedItem := m.list.SelectedItem()
+		if selectedItem == nil {
+			m.statusMsg = "❌ No issue selected"
+			m.statusIsError = true
+		} else if issueItem, ok := selectedItem.(IssueItem); ok {
+			if err := clipboard.WriteAll(issueItem.Issue.ID); err != nil {
+				m.statusMsg = fmt.Sprintf("❌ Clipboard error: %v", err)
+				m.statusIsError = true
+			} else {
+				m.statusMsg = fmt.Sprintf("📋 Copied %s to clipboard", issueItem.Issue.ID)
+				m.statusIsError = false
+			}
+		}
 	}
 	return m
 }
