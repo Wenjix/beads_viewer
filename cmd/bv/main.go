@@ -1472,34 +1472,99 @@ func main() {
 
 		// Watch mode (bv-55): monitor .beads/ for changes and auto-regenerate
 		if *watchExport {
-			cwd, _ := os.Getwd()
-			issuesFile := filepath.Join(cwd, ".beads", "issues.jsonl")
-
 			fmt.Println("")
 			fmt.Println("Watch mode enabled. Monitoring for changes...")
-			fmt.Printf("  → Watching: %s\n", issuesFile)
+
+			// Collect all issues.jsonl files to watch
+			var watchFiles []string
+			var watchers []*watcher.Watcher
+
+			if *workspaceConfig != "" {
+				// Workspace mode: watch all repos' issues.jsonl files (bv-79)
+				wsConfig, err := workspace.LoadConfig(*workspaceConfig)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error loading workspace config: %v\n", err)
+					os.Exit(1)
+				}
+				workspaceRoot := filepath.Dir(filepath.Dir(*workspaceConfig))
+
+				for _, repo := range wsConfig.Repos {
+					if !repo.IsEnabled() {
+						continue
+					}
+					repoPath := repo.Path
+					if !filepath.IsAbs(repoPath) {
+						repoPath = filepath.Join(workspaceRoot, repoPath)
+					}
+					beadsDir := filepath.Join(repoPath, repo.GetBeadsPath())
+					issuesFile, err := loader.FindJSONLPath(beadsDir)
+					if err != nil {
+						fmt.Printf("  → Warning: could not find issues.jsonl for repo %s: %v\n", repo.GetName(), err)
+						continue
+					}
+					watchFiles = append(watchFiles, issuesFile)
+				}
+
+				if len(watchFiles) == 0 {
+					fmt.Fprintf(os.Stderr, "Error: no valid issues.jsonl files found in workspace\n")
+					os.Exit(1)
+				}
+			} else {
+				// Single-repo mode: watch current directory's issues.jsonl
+				cwd, _ := os.Getwd()
+				issuesFile := filepath.Join(cwd, ".beads", "issues.jsonl")
+				watchFiles = append(watchFiles, issuesFile)
+			}
+
+			// Print watched files
+			for _, f := range watchFiles {
+				fmt.Printf("  → Watching: %s\n", f)
+			}
 			fmt.Println("  → Press Ctrl+C to stop")
 			fmt.Println("")
 			fmt.Println("To preview with auto-refresh, run in another terminal:")
 			fmt.Printf("  bv --preview-pages %s\n", *exportPages)
 
-			// Create file watcher with 500ms debounce
-			w, err := watcher.NewWatcher(issuesFile,
-				watcher.WithDebounceDuration(500*time.Millisecond),
-				watcher.WithOnError(func(err error) {
-					fmt.Printf("  → Watch error: %v\n", err)
-				}),
-			)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error creating watcher: %v\n", err)
-				os.Exit(1)
+			// Create a merged change channel for all watchers
+			mergedChangeCh := make(chan struct{}, 1)
+
+			// Create file watchers with 500ms debounce for each file
+			for _, watchFile := range watchFiles {
+				w, err := watcher.NewWatcher(watchFile,
+					watcher.WithDebounceDuration(500*time.Millisecond),
+					watcher.WithOnError(func(err error) {
+						fmt.Printf("  → Watch error: %v\n", err)
+					}),
+				)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error creating watcher for %s: %v\n", watchFile, err)
+					os.Exit(1)
+				}
+
+				if err := w.Start(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error starting watcher for %s: %v\n", watchFile, err)
+					os.Exit(1)
+				}
+				watchers = append(watchers, w)
+
+				// Forward changes to merged channel
+				go func(ch <-chan struct{}) {
+					for range ch {
+						select {
+						case mergedChangeCh <- struct{}{}:
+						default:
+							// Already a change pending, skip
+						}
+					}
+				}(w.Changed())
 			}
 
-			if err := w.Start(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error starting watcher: %v\n", err)
-				os.Exit(1)
-			}
-			defer w.Stop()
+			// Cleanup all watchers on exit
+			defer func() {
+				for _, w := range watchers {
+					w.Stop()
+				}
+			}()
 
 			// Set up signal handling for graceful shutdown
 			sigCh := make(chan os.Signal, 1)
@@ -1509,9 +1574,15 @@ func main() {
 			// Watch loop
 			for {
 				select {
-				case <-w.Changed():
-					// Reload issues from disk
-					freshIssues, err := loader.LoadIssues("")
+				case <-mergedChangeCh:
+					// Reload issues from disk using appropriate method
+					var freshIssues []model.Issue
+					var err error
+					if *workspaceConfig != "" {
+						freshIssues, _, err = workspace.LoadAllFromConfig(context.Background(), *workspaceConfig)
+					} else {
+						freshIssues, err = loader.LoadIssues("")
+					}
 					if err != nil {
 						fmt.Printf("  → Error reloading issues: %v\n", err)
 						continue
