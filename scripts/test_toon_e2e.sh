@@ -236,11 +236,11 @@ ROBOT_CMDS=(
     "--robot-alerts"
     "--robot-suggest"
     "--robot-graph"
-    "--robot-list"
     "--robot-schema"
     "--robot-label-health"
     "--robot-label-flow"
     "--robot-label-attention"
+    "--robot-sprint-list"
 )
 
 passed_cmds=0
@@ -273,10 +273,16 @@ log "--- Phase 7: Unit Tests ---"
 
 if [[ -d "$PROJECT_DIR/cmd/bv" ]]; then
     cd "$PROJECT_DIR"
-    if go test ./cmd/bv/... -run "TOON" -v 2>&1 | tail -20; then
+    # Use pipefail to capture go test exit code through the pipe
+    set +e
+    test_output=$(go test ./cmd/bv/... -run "TOON" -v 2>&1)
+    test_exit=$?
+    set -e
+    echo "$test_output" | tail -20
+    if [[ $test_exit -eq 0 ]]; then
         record_pass "go test TOON tests"
     else
-        record_skip "No TOON-specific unit tests or test failure"
+        record_fail "go test TOON tests failed (exit $test_exit)"
     fi
 else
     record_skip "beads_viewer repo not found"
