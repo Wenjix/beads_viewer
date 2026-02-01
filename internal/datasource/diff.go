@@ -3,6 +3,7 @@ package datasource
 import (
 	"fmt"
 
+	"github.com/Dicklesworthstone/beads_viewer/pkg/loader"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
 )
 
@@ -194,9 +195,7 @@ func loadIssuesFromSource(source DataSource) ([]model.Issue, error) {
 
 // loadIssuesFromJSONL loads issues from a JSONL file using the existing loader
 func loadIssuesFromJSONL(path string) ([]model.Issue, error) {
-	// Import the loader package and use it
-	// For now, implement a simple version here
-	return nil, fmt.Errorf("JSONL loading should use pkg/loader.LoadIssuesFromFile")
+	return loader.LoadIssuesFromFile(path)
 }
 
 // CheckAllSourcesConsistent compares all sources and reports any inconsistencies
