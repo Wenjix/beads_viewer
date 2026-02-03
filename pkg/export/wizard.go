@@ -25,6 +25,12 @@ type WizardConfig struct {
 	Title          string `json:"title"`
 	Subtitle       string `json:"subtitle,omitempty"`
 
+	// Source metadata for reliable updates
+	SourceBeadsDir string `json:"source_beads_dir,omitempty"`
+	SourceRepoRoot string `json:"source_repo_root,omitempty"`
+	LastIssueCount int    `json:"last_issue_count,omitempty"`
+	LastDataHash   string `json:"last_data_hash,omitempty"`
+
 	// Deployment target
 	DeployTarget string `json:"deploy_target"` // "github", "cloudflare", "local"
 

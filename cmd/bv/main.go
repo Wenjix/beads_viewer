@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -1384,7 +1385,7 @@ func main() {
 
 	// Handle --pages wizard (bv-10g)
 	if *pagesWizard {
-		if err := runPagesWizard(issues, beadsPath); err != nil {
+		if err := runPagesWizard(beadsPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -5970,7 +5971,7 @@ func runPreviewServer(dir string, liveReload bool) error {
 }
 
 // runPagesWizard runs the interactive deployment wizard (bv-10g).
-func runPagesWizard(issues []model.Issue, beadsPath string) error {
+func runPagesWizard(beadsPath string) error {
 	wizard := export.NewWizard(beadsPath)
 
 	// Run interactive wizard to collect configuration
@@ -5980,6 +5981,15 @@ func runPagesWizard(issues []model.Issue, beadsPath string) error {
 	}
 
 	config := wizard.GetConfig()
+
+	// Resolve the actual source of issues for this deployment.
+	// This ensures updates always use the originally-deployed dataset,
+	// even if the user runs bv from a different directory.
+	source, err := resolvePagesSource(config, beadsPath)
+	if err != nil {
+		return err
+	}
+	issues := source.Issues
 
 	// Filter issues based on config
 	exportIssues := issues
@@ -6010,6 +6020,10 @@ func runPagesWizard(issues []model.Issue, beadsPath string) error {
 
 	// Perform export
 	wizard.PerformExport(bundlePath)
+
+	if source.BeadsDir != "" {
+		fmt.Printf("  -> Using beads source: %s (%s)\n", source.BeadsDir, source.Reason)
+	}
 
 	fmt.Println("Exporting static site...")
 	fmt.Printf("  -> Loading %d issues\n", len(exportIssues))
@@ -6144,10 +6158,273 @@ func runPagesWizard(issues []model.Issue, beadsPath string) error {
 		wizard.PrintSuccess(result)
 	}
 
+	// Persist source metadata and last-export info for reliable updates.
+	if source.BeadsDir != "" {
+		config.SourceBeadsDir = source.BeadsDir
+	}
+	if source.RepoRoot != "" {
+		config.SourceRepoRoot = source.RepoRoot
+	}
+	config.LastIssueCount = len(exportIssues)
+	config.LastDataHash = analysis.ComputeDataHash(exportIssues)
+
 	// Save config for next run
 	export.SaveWizardConfig(config)
 
 	return nil
+}
+
+type pagesSource struct {
+	Issues   []model.Issue
+	BeadsDir string
+	RepoRoot string
+	Reason   string
+}
+
+type pagesSourceCandidate struct {
+	BeadsDir string
+	Reason   string
+}
+
+func resolvePagesSource(config *export.WizardConfig, beadsPath string) (pagesSource, error) {
+	var candidates []pagesSourceCandidate
+	seen := map[string]bool{}
+
+	addCandidate := func(dir, reason string) {
+		if dir == "" {
+			return
+		}
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
+		if seen[dir] {
+			return
+		}
+		seen[dir] = true
+		candidates = append(candidates, pagesSourceCandidate{BeadsDir: dir, Reason: reason})
+	}
+
+	if config.SourceBeadsDir != "" {
+		addCandidate(config.SourceBeadsDir, "saved source")
+	}
+	if config.SourceRepoRoot != "" {
+		addCandidate(filepath.Join(config.SourceRepoRoot, ".beads"), "saved repo root")
+	}
+	if beadsPath != "" {
+		addCandidate(filepath.Dir(beadsPath), "current beads path")
+	}
+	if dir, err := loader.GetBeadsDir(""); err == nil {
+		addCandidate(dir, "current repo")
+	}
+
+	var lastErr error
+	for _, cand := range candidates {
+		if info, err := os.Stat(cand.BeadsDir); err != nil || !info.IsDir() {
+			continue
+		}
+		issues, err := datasource.LoadIssuesFromDir(cand.BeadsDir)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		src := pagesSource{
+			Issues:   issues,
+			BeadsDir: cand.BeadsDir,
+			RepoRoot: filepath.Dir(cand.BeadsDir),
+			Reason:   cand.Reason,
+		}
+
+		// If the issue count looks wildly off, try to auto-detect a better source.
+		if isSuspiciousIssueCount(len(issues), config.LastIssueCount) {
+			if improved, ok := findBetterPagesSource(config, src, beadsPath); ok {
+				return improved, nil
+			}
+		}
+		return src, nil
+	}
+
+	if lastErr != nil {
+		return pagesSource{}, lastErr
+	}
+	return pagesSource{}, fmt.Errorf("no valid beads source found for pages export")
+}
+
+func isSuspiciousIssueCount(current, expected int) bool {
+	if current == 0 {
+		return true
+	}
+	if expected <= 0 {
+		return current <= 3
+	}
+	threshold := expected / 5
+	if threshold < 5 {
+		threshold = 5
+	}
+	return current < threshold
+}
+
+func findBetterPagesSource(config *export.WizardConfig, current pagesSource, beadsPath string) (pagesSource, bool) {
+	expected := config.LastIssueCount
+	currentCount := len(current.Issues)
+	currentDiff := absInt(currentCount - expected)
+
+	roots := []string{}
+	seenRoots := map[string]bool{}
+	addRoot := func(root string) {
+		if root == "" {
+			return
+		}
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+		if seenRoots[root] {
+			return
+		}
+		if info, err := os.Stat(root); err != nil || !info.IsDir() {
+			return
+		}
+		seenRoots[root] = true
+		roots = append(roots, root)
+	}
+
+	if config.SourceRepoRoot != "" {
+		addRoot(config.SourceRepoRoot)
+	}
+	if beadsPath != "" {
+		addRoot(filepath.Dir(filepath.Dir(beadsPath)))
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		addRoot(cwd)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		addRoot(home)
+	}
+	if info, err := os.Stat("/dp"); err == nil && info.IsDir() {
+		addRoot("/dp")
+	}
+
+	bestDir := ""
+	bestCount := 0
+	bestDiff := 0
+
+	for _, root := range roots {
+		for _, beadsDir := range discoverBeadsDirs(root, 4) {
+			if beadsDir == current.BeadsDir {
+				continue
+			}
+			count, err := countIssuesInBeadsDir(beadsDir)
+			if err != nil || count == 0 {
+				continue
+			}
+
+			if expected > 0 {
+				diff := absInt(count - expected)
+				if bestDir == "" || diff < bestDiff || (diff == bestDiff && count > bestCount) {
+					bestDir = beadsDir
+					bestCount = count
+					bestDiff = diff
+				}
+			} else if count > bestCount {
+				bestDir = beadsDir
+				bestCount = count
+			}
+		}
+	}
+
+	if bestDir == "" {
+		return pagesSource{}, false
+	}
+
+	if expected > 0 && bestDiff >= currentDiff {
+		return pagesSource{}, false
+	}
+	if expected == 0 && bestCount <= currentCount {
+		return pagesSource{}, false
+	}
+
+	issues, err := datasource.LoadIssuesFromDir(bestDir)
+	if err != nil {
+		return pagesSource{}, false
+	}
+	return pagesSource{
+		Issues:   issues,
+		BeadsDir: bestDir,
+		RepoRoot: filepath.Dir(bestDir),
+		Reason:   "auto-detected better source",
+	}, true
+}
+
+func discoverBeadsDirs(root string, maxDepth int) []string {
+	var dirs []string
+	root = filepath.Clean(root)
+	sep := string(os.PathSeparator)
+
+	skip := map[string]bool{
+		".git":         true,
+		"node_modules": true,
+		"vendor":       true,
+		"dist":         true,
+		"build":        true,
+		"target":       true,
+		".cache":       true,
+		".bv":          true,
+		".idea":        true,
+		".vscode":      true,
+	}
+
+	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+
+		name := d.Name()
+		if skip[name] && path != root {
+			return fs.SkipDir
+		}
+
+		rel := strings.TrimPrefix(strings.TrimPrefix(path, root), sep)
+		if rel != "" {
+			if depth := len(strings.Split(rel, sep)); depth > maxDepth {
+				return fs.SkipDir
+			}
+		}
+
+		if name == ".beads" {
+			dirs = append(dirs, path)
+			return fs.SkipDir
+		}
+		return nil
+	})
+	return dirs
+}
+
+func countIssuesInBeadsDir(beadsDir string) (int, error) {
+	sources, err := datasource.DiscoverSources(datasource.DiscoveryOptions{
+		BeadsDir:               beadsDir,
+		ValidateAfterDiscovery: true,
+		IncludeInvalid:         false,
+	})
+	if err != nil {
+		return 0, err
+	}
+	if len(sources) == 0 {
+		return 0, fmt.Errorf("no sources in %s", beadsDir)
+	}
+	result, err := datasource.SelectBestSourceDetailed(sources, datasource.DefaultSelectionOptions())
+	if err != nil {
+		return 0, err
+	}
+	return result.Selected.IssueCount, nil
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // BurndownOutput represents the JSON output for --robot-burndown (bv-159)
@@ -6927,55 +7204,55 @@ func generateRobotDocs(topic string) map[string]interface{} {
 	commands := map[string]cmdDoc{
 		"robot-triage": {
 			Flag: "--robot-triage", Description: "Unified triage: top picks, recommendations, quick wins, blockers, project health, velocity.",
-			KeyFields: []string{"triage.quick_ref.top_picks", "triage.recommendations", "triage.quick_wins", "triage.blockers_to_clear", "triage.project_health"},
+			KeyFields:   []string{"triage.quick_ref.top_picks", "triage.recommendations", "triage.quick_wins", "triage.blockers_to_clear", "triage.project_health"},
 			NeedsIssues: true,
 		},
 		"robot-next": {
 			Flag: "--robot-next", Description: "Single top recommendation with claim/show commands.",
-			KeyFields: []string{"id", "title", "score", "reasons", "unblocks", "claim_command", "show_command"},
+			KeyFields:   []string{"id", "title", "score", "reasons", "unblocks", "claim_command", "show_command"},
 			NeedsIssues: true,
 		},
 		"robot-plan": {
 			Flag: "--robot-plan", Description: "Dependency-respecting execution plan with parallel tracks.",
-			KeyFields: []string{"tracks", "items", "unblocks", "summary"},
+			KeyFields:   []string{"tracks", "items", "unblocks", "summary"},
 			NeedsIssues: true,
 		},
 		"robot-insights": {
 			Flag: "--robot-insights", Description: "Deep graph analysis: PageRank, betweenness, HITS, eigenvector, k-core, cycle detection.",
-			KeyFields: []string{"pagerank", "betweenness", "hits", "eigenvector", "k_core", "cycles"},
+			KeyFields:   []string{"pagerank", "betweenness", "hits", "eigenvector", "k_core", "cycles"},
 			NeedsIssues: true,
 		},
 		"robot-priority": {
 			Flag: "--robot-priority", Description: "Priority misalignment detection: items whose graph importance differs from assigned priority.",
-			KeyFields: []string{"misalignments", "suggestions"},
+			KeyFields:   []string{"misalignments", "suggestions"},
 			NeedsIssues: true,
 		},
 		"robot-triage-by-track": {
 			Flag: "--robot-triage-by-track", Description: "Triage grouped by independent parallel execution tracks.",
-			KeyFields: []string{"tracks[].track_id", "tracks[].top_pick", "tracks[].items"},
+			KeyFields:   []string{"tracks[].track_id", "tracks[].top_pick", "tracks[].items"},
 			NeedsIssues: true,
 		},
 		"robot-triage-by-label": {
 			Flag: "--robot-triage-by-label", Description: "Triage grouped by label for area-focused agents.",
-			KeyFields: []string{"labels[].label", "labels[].top_pick", "labels[].items"},
+			KeyFields:   []string{"labels[].label", "labels[].top_pick", "labels[].items"},
 			NeedsIssues: true,
 		},
 		"robot-alerts": {
 			Flag: "--robot-alerts", Description: "Stale issues, blocking cascades, priority mismatches.",
-			KeyFields: []string{"alerts", "severity", "affected_issues"},
-			Params:  []string{"--severity info|warning|critical", "--alert-type <type>", "--alert-label <label>"},
+			KeyFields:   []string{"alerts", "severity", "affected_issues"},
+			Params:      []string{"--severity info|warning|critical", "--alert-type <type>", "--alert-label <label>"},
 			NeedsIssues: true,
 		},
 		"robot-suggest": {
 			Flag: "--robot-suggest", Description: "Smart suggestions: potential duplicates, missing dependencies, label assignments, cycle warnings.",
-			KeyFields: []string{"suggestions", "type", "confidence"},
-			Params:  []string{"--suggest-type duplicate|dependency|label|cycle", "--suggest-confidence 0.0-1.0", "--suggest-bead <id>"},
+			KeyFields:   []string{"suggestions", "type", "confidence"},
+			Params:      []string{"--suggest-type duplicate|dependency|label|cycle", "--suggest-confidence 0.0-1.0", "--suggest-bead <id>"},
 			NeedsIssues: true,
 		},
 		"robot-schema": {
 			Flag: "--robot-schema", Description: "JSON Schema definitions for all robot command outputs.",
-			KeyFields: []string{"schema_version", "envelope", "commands"},
-			Params:  []string{"--schema-command <cmd>"},
+			KeyFields:   []string{"schema_version", "envelope", "commands"},
+			Params:      []string{"--schema-command <cmd>"},
 			NeedsIssues: false,
 		},
 		"robot-docs": {
@@ -6984,18 +7261,18 @@ func generateRobotDocs(topic string) map[string]interface{} {
 		},
 		"robot-history": {
 			Flag: "--robot-history", Description: "Bead-to-commit correlations from git history.",
-			KeyFields: []string{"correlations", "confidence", "commit_sha", "bead_id"},
-			Params:  []string{"--bead-history <id>", "--history-since <date>", "--history-limit <n>", "--min-confidence 0.0-1.0"},
+			KeyFields:   []string{"correlations", "confidence", "commit_sha", "bead_id"},
+			Params:      []string{"--bead-history <id>", "--history-since <date>", "--history-limit <n>", "--min-confidence 0.0-1.0"},
 			NeedsIssues: true,
 		},
 		"robot-diff": {
 			Flag: "--robot-diff", Description: "Changes since a historical point (commit, branch, tag, or date).",
-			Params:  []string{"--diff-since <ref>"},
+			Params:      []string{"--diff-since <ref>"},
 			NeedsIssues: true,
 		},
 		"robot-search": {
 			Flag: "--robot-search", Description: "Semantic vector search over issue titles and descriptions.",
-			Params:  []string{"--search <query>", "--search-limit <n>", "--search-mode text|hybrid"},
+			Params:      []string{"--search <query>", "--search-limit <n>", "--search-mode text|hybrid"},
 			NeedsIssues: true,
 		},
 		"robot-label-health": {
@@ -7008,12 +7285,12 @@ func generateRobotDocs(topic string) map[string]interface{} {
 		},
 		"robot-label-attention": {
 			Flag: "--robot-label-attention", Description: "Attention-ranked labels requiring focus.",
-			Params:  []string{"--attention-limit <n>"},
+			Params:      []string{"--attention-limit <n>"},
 			NeedsIssues: true,
 		},
 		"robot-graph": {
 			Flag: "--robot-graph", Description: "Dependency graph export in JSON, DOT, or Mermaid format.",
-			Params:  []string{"--graph-format json|dot|mermaid", "--graph-root <id>", "--graph-depth <n>"},
+			Params:      []string{"--graph-format json|dot|mermaid", "--graph-root <id>", "--graph-depth <n>"},
 			NeedsIssues: true,
 		},
 		"robot-metrics": {
@@ -7022,27 +7299,27 @@ func generateRobotDocs(topic string) map[string]interface{} {
 		},
 		"robot-orphans": {
 			Flag: "--robot-orphans", Description: "Orphan commit candidates that should be linked to beads.",
-			Params:  []string{"--orphans-min-score 0-100"},
+			Params:      []string{"--orphans-min-score 0-100"},
 			NeedsIssues: true,
 		},
 		"robot-file-beads": {
 			Flag: "--robot-file-beads <path>", Description: "Beads that touched a specific file path.",
-			Params:  []string{"--file-beads-limit <n>"},
+			Params:      []string{"--file-beads-limit <n>"},
 			NeedsIssues: true,
 		},
 		"robot-file-hotspots": {
 			Flag: "--robot-file-hotspots", Description: "Files touched by the most beads.",
-			Params:  []string{"--hotspots-limit <n>"},
+			Params:      []string{"--hotspots-limit <n>"},
 			NeedsIssues: true,
 		},
 		"robot-file-relations": {
 			Flag: "--robot-file-relations <path>", Description: "Files that frequently co-change with a given file.",
-			Params:  []string{"--relations-threshold 0.0-1.0", "--relations-limit <n>"},
+			Params:      []string{"--relations-threshold 0.0-1.0", "--relations-limit <n>"},
 			NeedsIssues: true,
 		},
 		"robot-related": {
 			Flag: "--robot-related <id>", Description: "Beads related to a specific bead ID.",
-			Params:  []string{"--related-min-relevance 0-100", "--related-max-results <n>", "--related-include-closed"},
+			Params:      []string{"--related-min-relevance 0-100", "--related-max-results <n>", "--related-include-closed"},
 			NeedsIssues: true,
 		},
 		"robot-blocker-chain": {
@@ -7051,7 +7328,7 @@ func generateRobotDocs(topic string) map[string]interface{} {
 		},
 		"robot-impact-network": {
 			Flag: "--robot-impact-network [<id>|all]", Description: "Impact network graph (full or subnetwork for a bead).",
-			Params:  []string{"--network-depth 1-3"},
+			Params:      []string{"--network-depth 1-3"},
 			NeedsIssues: true,
 		},
 		"robot-causality": {
@@ -7068,12 +7345,12 @@ func generateRobotDocs(topic string) map[string]interface{} {
 		},
 		"robot-forecast": {
 			Flag: "--robot-forecast <id|all>", Description: "ETA predictions for bead completion.",
-			Params:  []string{"--forecast-label <label>", "--forecast-sprint <id>", "--forecast-agents <n>"},
+			Params:      []string{"--forecast-label <label>", "--forecast-sprint <id>", "--forecast-agents <n>"},
 			NeedsIssues: true,
 		},
 		"robot-capacity": {
 			Flag: "--robot-capacity", Description: "Capacity simulation and completion projections.",
-			Params:  []string{"--agents <n>", "--capacity-label <label>"},
+			Params:      []string{"--agents <n>", "--capacity-label <label>"},
 			NeedsIssues: true,
 		},
 		"robot-burndown": {
@@ -7195,9 +7472,9 @@ func generateRobotSchemas() RobotSchemas {
 						"quick_ref": map[string]interface{}{
 							"type": "object",
 							"properties": map[string]interface{}{
-								"open_count":       map[string]interface{}{"type": "integer"},
-								"actionable_count": map[string]interface{}{"type": "integer"},
-								"blocked_count":    map[string]interface{}{"type": "integer"},
+								"open_count":        map[string]interface{}{"type": "integer"},
+								"actionable_count":  map[string]interface{}{"type": "integer"},
+								"blocked_count":     map[string]interface{}{"type": "integer"},
 								"in_progress_count": map[string]interface{}{"type": "integer"},
 								"top_picks": map[string]interface{}{
 									"type":  "array",
@@ -7379,12 +7656,12 @@ func generateRobotSchemas() RobotSchemas {
 			"description": "Sprint burndown data with scope changes and at-risk items",
 			"type":        "object",
 			"properties": map[string]interface{}{
-				"generated_at": map[string]interface{}{"type": "string", "format": "date-time"},
-				"data_hash":    map[string]interface{}{"type": "string"},
-				"sprint_id":    map[string]interface{}{"type": "string"},
-				"burndown":     map[string]interface{}{"type": "array"},
+				"generated_at":  map[string]interface{}{"type": "string", "format": "date-time"},
+				"data_hash":     map[string]interface{}{"type": "string"},
+				"sprint_id":     map[string]interface{}{"type": "string"},
+				"burndown":      map[string]interface{}{"type": "array"},
 				"scope_changes": map[string]interface{}{"type": "array"},
-				"at_risk":      map[string]interface{}{"type": "array"},
+				"at_risk":       map[string]interface{}{"type": "array"},
 			},
 		},
 		"robot-forecast": {
