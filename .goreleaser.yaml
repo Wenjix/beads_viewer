@@ -4,7 +4,7 @@ builds:
     binary: bv
     ldflags:
       - -s -w
-      - -X github.com/Dicklesworthstone/beads_viewer/pkg/version.Version={{.Version}}
+      - -X github.com/Dicklesworthstone/beads_viewer/pkg/version.Version=v{{.Version}}
     goos:
       - linux
       - darwin
