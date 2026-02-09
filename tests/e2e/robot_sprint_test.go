@@ -110,18 +110,28 @@ func TestRobotSprintShow_Found(t *testing.T) {
 	}
 	t.Logf("--robot-sprint-show output:\n%s", out)
 
-	var sprint struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+	var payload struct {
+		GeneratedAt string `json:"generated_at"`
+		DataHash    string `json:"data_hash"`
+		Sprint      struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"sprint"`
 	}
-	if err := json.Unmarshal(out, &sprint); err != nil {
+	if err := json.Unmarshal(out, &payload); err != nil {
 		t.Fatalf("json decode: %v\nout=%s", err, out)
 	}
-	if sprint.ID != "sprint-1" {
-		t.Fatalf("expected id sprint-1, got %q", sprint.ID)
+	if payload.GeneratedAt == "" {
+		t.Fatalf("expected generated_at to be set")
 	}
-	if sprint.Name != "Sprint 1" {
-		t.Fatalf("expected name Sprint 1, got %q", sprint.Name)
+	if payload.DataHash == "" {
+		t.Fatalf("expected data_hash to be set")
+	}
+	if payload.Sprint.ID != "sprint-1" {
+		t.Fatalf("expected sprint.id sprint-1, got %q", payload.Sprint.ID)
+	}
+	if payload.Sprint.Name != "Sprint 1" {
+		t.Fatalf("expected sprint.name Sprint 1, got %q", payload.Sprint.Name)
 	}
 }
 
