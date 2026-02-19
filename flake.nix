@@ -13,7 +13,7 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
-        version = "0.11.3";
+        version = "0.14.4";
 
         # To update vendorHash after go.mod/go.sum changes:
         # 1. Set vendorHash to: pkgs.lib.fakeHash
@@ -21,7 +21,7 @@
         # 3. Replace vendorHash with the hash from "got:"
         # Updated to include pgregory.net/rapid and github.com/goccy/go-json dependencies
         # If build fails, use fakeHash method documented above to recalculate
-        vendorHash = "sha256-V8Bl5lW9vd7o1ZcQ6rvs3WJ1ueYX7xKnHTyRAASHlng=";
+        vendorHash = null;
       in
       {
         packages = {
