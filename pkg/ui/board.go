@@ -947,15 +947,16 @@ func (b BoardModel) View(width, height int) string {
 	//   baseWidth = (boardWidth / numCols) - 2
 	//
 	// We prefer a minimum of 28 for readability but will shrink below
-	// that if the terminal is too narrow, with an absolute floor of 12.
+	// that if the terminal is too narrow, with an absolute floor of 4.
 	borderOverhead := 2 // left + right border character
 	baseWidth := (boardWidth / numCols) - borderOverhead
 	if baseWidth < 12 {
 		baseWidth = 12
 	}
-	// Verify total does not exceed boardWidth; shrink further if needed
-	// (can happen due to integer division rounding)
-	for numCols*(baseWidth+borderOverhead) > boardWidth && baseWidth > 12 {
+	// Verify total does not exceed boardWidth; shrink further if needed.
+	// Allow shrinking below the 12-char floor when the terminal is too
+	// narrow for that many columns (absolute floor of 4 for content).
+	for numCols*(baseWidth+borderOverhead) > boardWidth && baseWidth > 4 {
 		baseWidth--
 	}
 
