@@ -934,20 +934,30 @@ func (b BoardModel) View(width, height int) string {
 		boardWidth = width - detailWidth - 1 // 1 char gap
 	}
 
-	// Calculate column widths - distribute space evenly
-	// Minimum column width for readability, NO maximum cap (bv-ic17)
-	minColWidth := 28
-
-	// Calculate available width (subtract gaps between columns)
-	gaps := numCols - 1
-	availableWidth := boardWidth - (gaps * 2) // 2 chars gap between columns
-
-	// Distribute width evenly across columns, respecting minimum
-	baseWidth := availableWidth / numCols
-	if baseWidth < minColWidth {
-		baseWidth = minColWidth
+	// Calculate column widths - distribute space evenly.
+	// Each column is rendered with Border(RoundedBorder()) which adds 2
+	// characters horizontally (left + right border). Lipgloss Width()
+	// sets the content+padding width; the border is drawn outside that.
+	// So each column's total rendered width = baseWidth + 2.
+	// JoinHorizontal places columns edge-to-edge (no extra gap); the
+	// adjacent borders of neighbouring columns provide visual separation.
+	//
+	// Total rendered width = numCols * (baseWidth + 2)
+	// This must fit within boardWidth, so:
+	//   baseWidth = (boardWidth / numCols) - 2
+	//
+	// We prefer a minimum of 28 for readability but will shrink below
+	// that if the terminal is too narrow, with an absolute floor of 12.
+	borderOverhead := 2 // left + right border character
+	baseWidth := (boardWidth / numCols) - borderOverhead
+	if baseWidth < 12 {
+		baseWidth = 12
 	}
-	// NO maxColWidth cap - use all available horizontal space
+	// Verify total does not exceed boardWidth; shrink further if needed
+	// (can happen due to integer division rounding)
+	for numCols*(baseWidth+borderOverhead) > boardWidth && baseWidth > 12 {
+		baseWidth--
+	}
 
 	colHeight := height - 6 // Account for column header + title bar (bv-tf6j)
 	if colHeight < 8 {
@@ -1040,7 +1050,7 @@ func (b BoardModel) View(width, height int) string {
 		}
 
 		headerStyle := t.Renderer.NewStyle().
-			Width(baseWidth).
+			Width(baseWidth + borderOverhead). // Match total column width (content + border)
 			Align(lipgloss.Center).
 			Bold(true).
 			Padding(0, 1)
@@ -1086,6 +1096,12 @@ func (b BoardModel) View(width, height int) string {
 		}
 
 		// Render cards
+		// Card width = baseWidth - 4 to fit inside column padding (2) and
+		// leave room for the card's own border (2). Clamp to minimum of 6.
+		cardWidth := baseWidth - 4
+		if cardWidth < 6 {
+			cardWidth = 6
+		}
 		var cards []string
 		for rowIdx := start; rowIdx < end; rowIdx++ {
 			issue := issues[rowIdx]
@@ -1094,9 +1110,9 @@ func (b BoardModel) View(width, height int) string {
 			// Check if this card is expanded (bv-i3ii)
 			var card string
 			if b.IsCardExpanded(issue.ID) {
-				card = b.renderExpandedCard(issue, baseWidth-4, colIdx, rowIdx)
+				card = b.renderExpandedCard(issue, cardWidth, colIdx, rowIdx)
 			} else {
-				card = b.renderCard(issue, baseWidth-4, isSelected, colIdx, rowIdx)
+				card = b.renderCard(issue, cardWidth, isSelected, colIdx, rowIdx)
 			}
 			cards = append(cards, card)
 		}
@@ -1104,7 +1120,7 @@ func (b BoardModel) View(width, height int) string {
 		// Empty column placeholder
 		if issueCount == 0 {
 			emptyStyle := t.Renderer.NewStyle().
-				Width(baseWidth-4).
+				Width(cardWidth).
 				Height(colHeight-2).
 				Align(lipgloss.Center, lipgloss.Center).
 				Foreground(t.Secondary).
@@ -1116,7 +1132,7 @@ func (b BoardModel) View(width, height int) string {
 		if issueCount > visibleCards {
 			scrollInfo := fmt.Sprintf("↕ %d/%d", sel+1, issueCount)
 			scrollStyle := t.Renderer.NewStyle().
-				Width(baseWidth - 4).
+				Width(cardWidth).
 				Align(lipgloss.Center).
 				Foreground(t.Secondary).
 				Italic(true)
@@ -1143,7 +1159,7 @@ func (b BoardModel) View(width, height int) string {
 		renderedCols = append(renderedCols, column)
 	}
 
-	// Join columns with gaps
+	// Join columns edge-to-edge (adjacent borders provide visual separation)
 	columnsView := lipgloss.JoinHorizontal(lipgloss.Top, renderedCols...)
 
 	// Build title bar with swimlane mode and hidden column indicator (bv-tf6j)
