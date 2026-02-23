@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	osExec "os/exec"
 	"path/filepath"
@@ -37,10 +38,21 @@ func githubToken() string {
 	return os.Getenv("GH_TOKEN")
 }
 
+// isGitHubHost returns true if the given URL points to a github.com or
+// githubusercontent.com domain (including subdomains like api.github.com,
+// objects.githubusercontent.com, etc.).
+func isGitHubHost(u *url.URL) bool {
+	host := strings.ToLower(u.Hostname())
+	return host == "github.com" || strings.HasSuffix(host, ".github.com") ||
+		host == "githubusercontent.com" || strings.HasSuffix(host, ".githubusercontent.com")
+}
+
 // setGitHubAuth adds Authorization header to a request if a GitHub token
-// is available in the environment (GITHUB_TOKEN or GH_TOKEN).
+// is available in the environment (GITHUB_TOKEN or GH_TOKEN) and the
+// request targets a GitHub domain. This prevents leaking tokens to
+// non-GitHub hosts (e.g. CDN redirects).
 func setGitHubAuth(req *http.Request) {
-	if tok := githubToken(); tok != "" {
+	if tok := githubToken(); tok != "" && isGitHubHost(req.URL) {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 }
@@ -391,7 +403,20 @@ func (r *Release) FindChecksumAsset() *Asset {
 // If expectedSize is > 0, the download is size-verified against the HTTP Content-Length
 // (when present) and the number of bytes written.
 func downloadFile(url, destPath string, expectedSize int64) error {
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := &http.Client{
+		Timeout: 5 * time.Minute,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			// Strip Authorization header when redirecting to non-GitHub hosts
+			// to avoid leaking tokens to third-party CDNs.
+			if !isGitHubHost(req.URL) {
+				req.Header.Del("Authorization")
+			}
+			return nil
+		},
+	}
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return err

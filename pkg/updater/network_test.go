@@ -8,6 +8,36 @@ import (
 	"time"
 )
 
+// TestIsGitHubHost verifies the domain allow-list for token transmission.
+func TestIsGitHubHost(t *testing.T) {
+	tests := []struct {
+		rawURL string
+		want   bool
+	}{
+		{"https://api.github.com/repos/foo/bar", true},
+		{"https://github.com/releases/download/v1.0/file.tar.gz", true},
+		{"https://objects.githubusercontent.com/something", true},
+		{"https://raw.githubusercontent.com/foo/bar/main/file", true},
+		{"https://githubusercontent.com/something", true},
+		{"https://evil.com", false},
+		{"https://notgithub.com/repos", false},
+		{"https://github.com.evil.com/phish", false},
+		{"http://localhost:8080/test", false},
+		{"https://example.com", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.rawURL, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, tt.rawURL, nil)
+			if err != nil {
+				t.Fatalf("bad test URL %q: %v", tt.rawURL, err)
+			}
+			if got := isGitHubHost(req.URL); got != tt.want {
+				t.Errorf("isGitHubHost(%q) = %v, want %v", tt.rawURL, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCheckForUpdates_Network(t *testing.T) {
 	// Assume current version is v0.9.2 from version.go (hardcoded knowledge, but acceptable for unit tests)
 	// Better: we can't easily mock version.Version without changing that package or doing link-time substitution.
@@ -91,18 +121,21 @@ func TestCheckForUpdates_Network(t *testing.T) {
 	}
 }
 
-// TestCheckForUpdates_GitHubTokenAuth verifies that GITHUB_TOKEN is sent as a
-// Bearer token in the Authorization header when set (#117).
-func TestCheckForUpdates_GitHubTokenAuth(t *testing.T) {
+// TestSetGitHubAuth_GitHubDomain verifies that GITHUB_TOKEN is sent as a
+// Bearer token in the Authorization header only for GitHub domains (#117).
+func TestSetGitHubAuth_GitHubDomain(t *testing.T) {
 	tests := []struct {
-		name      string
-		envVar    string
-		envVal    string
-		wantAuth  string
+		name     string
+		envVar   string
+		envVal   string
+		url      string
+		wantAuth string
 	}{
-		{"GITHUB_TOKEN set", "GITHUB_TOKEN", "ghp_test123", "Bearer ghp_test123"},
-		{"GH_TOKEN set", "GH_TOKEN", "gho_fallback456", "Bearer gho_fallback456"},
-		{"No token set", "", "", ""},
+		{"GITHUB_TOKEN set + GitHub URL", "GITHUB_TOKEN", "ghp_test123", "https://api.github.com/repos/foo/bar", "Bearer ghp_test123"},
+		{"GH_TOKEN set + GitHub URL", "GH_TOKEN", "gho_fallback456", "https://api.github.com/repos/foo/bar", "Bearer gho_fallback456"},
+		{"No token set + GitHub URL", "", "", "https://api.github.com/repos/foo/bar", ""},
+		{"GITHUB_TOKEN set + non-GitHub URL", "GITHUB_TOKEN", "ghp_test123", "https://example.com/download", ""},
+		{"GITHUB_TOKEN set + localhost URL", "GITHUB_TOKEN", "ghp_test123", "http://localhost:8080/test", ""},
 	}
 
 	for _, tt := range tests {
@@ -115,18 +148,13 @@ func TestCheckForUpdates_GitHubTokenAuth(t *testing.T) {
 				defer os.Unsetenv(tt.envVar)
 			}
 
-			var gotAuth string
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				gotAuth = r.Header.Get("Authorization")
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(`{"tag_name": "v0.0.1", "html_url": "http://example.com"}`))
-			}))
-			defer server.Close()
+			req, err := http.NewRequest(http.MethodGet, tt.url, nil)
+			if err != nil {
+				t.Fatalf("failed to create request: %v", err)
+			}
+			setGitHubAuth(req)
 
-			client := server.Client()
-			client.Timeout = 1 * time.Second
-			checkForUpdates(client, server.URL)
-
+			gotAuth := req.Header.Get("Authorization")
 			if gotAuth != tt.wantAuth {
 				t.Errorf("Authorization header = %q, want %q", gotAuth, tt.wantAuth)
 			}
