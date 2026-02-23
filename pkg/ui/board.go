@@ -920,9 +920,16 @@ func (b BoardModel) View(width, height int) string {
 	}
 
 	// Calculate board width vs detail panel width (bv-r6kh)
-	// Detail panel takes ~35% of width when shown, min 40 chars
+	// Detail panel takes ~35% of width when shown, min 40 chars.
+	// The detail panel's lipgloss Width() sets content width; its
+	// RoundedBorder() adds 2 characters (left + right) outside that,
+	// so the total rendered detail width = detailWidth + 2.
+	// We must account for this border overhead when splitting space
+	// to prevent the combined layout from exceeding terminal width
+	// and corrupting box-drawing characters (#116).
 	boardWidth := width
 	detailWidth := 0
+	detailBorderOverhead := 2 // left + right border on detail panel
 	if b.showDetail && width > 120 {
 		detailWidth = width * 35 / 100
 		if detailWidth < 40 {
@@ -931,7 +938,7 @@ func (b BoardModel) View(width, height int) string {
 		if detailWidth > 80 {
 			detailWidth = 80
 		}
-		boardWidth = width - detailWidth - 1 // 1 char gap
+		boardWidth = width - detailWidth - detailBorderOverhead - 1 // 1 char gap + panel border
 	}
 
 	// Calculate column widths - distribute space evenly.
@@ -1163,8 +1170,16 @@ func (b BoardModel) View(width, height int) string {
 	// Join columns edge-to-edge (adjacent borders provide visual separation)
 	columnsView := lipgloss.JoinHorizontal(lipgloss.Top, renderedCols...)
 
+	// The actual rendered width of all columns combined. Use this for
+	// the title bar so it aligns exactly with the column borders below
+	// it, preventing box-drawing misalignment when the detail panel is
+	// visible (#116). Integer division in baseWidth can leave a
+	// remainder that would cause the title bar (set to boardWidth) to
+	// be wider than the columns.
+	actualColumnsWidth := numCols * (baseWidth + borderOverhead)
+
 	// Build title bar with swimlane mode and hidden column indicator (bv-tf6j)
-	titleBar := b.renderTitleBar(boardWidth, t)
+	titleBar := b.renderTitleBar(actualColumnsWidth, t)
 
 	// Combine title bar and columns
 	boardView := lipgloss.JoinVertical(lipgloss.Left, titleBar, columnsView)

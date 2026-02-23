@@ -26,6 +26,25 @@ const (
 	baseURL   = "https://api.github.com/repos/" + repoOwner + "/" + repoName
 )
 
+// githubToken returns a GitHub personal access token from the environment,
+// checking GITHUB_TOKEN first, then GH_TOKEN. Returns empty string if
+// neither is set. Using a token raises the API rate limit from 60 to
+// 5,000 requests/hour and avoids 403 errors on shared IPs (#117).
+func githubToken() string {
+	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+		return tok
+	}
+	return os.Getenv("GH_TOKEN")
+}
+
+// setGitHubAuth adds Authorization header to a request if a GitHub token
+// is available in the environment (GITHUB_TOKEN or GH_TOKEN).
+func setGitHubAuth(req *http.Request) {
+	if tok := githubToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+}
+
 // Release represents a GitHub release
 type Release struct {
 	TagName string  `json:"tag_name"`
@@ -67,6 +86,7 @@ func checkForUpdates(client *http.Client, url string) (string, string, error) {
 	}
 	// GitHub recommends sending a UA; some endpoints 403 without it.
 	req.Header.Set("User-Agent", "beads-viewer-update-check")
+	setGitHubAuth(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -317,6 +337,7 @@ func GetLatestRelease() (*Release, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "beads-viewer-updater")
+	setGitHubAuth(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -376,6 +397,7 @@ func downloadFile(url, destPath string, expectedSize int64) error {
 		return err
 	}
 	req.Header.Set("User-Agent", "beads-viewer-updater")
+	setGitHubAuth(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
