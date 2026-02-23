@@ -32,10 +32,10 @@ const (
 // neither is set. Using a token raises the API rate limit from 60 to
 // 5,000 requests/hour and avoids 403 errors on shared IPs (#117).
 func githubToken() string {
-	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+	if tok := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); tok != "" {
 		return tok
 	}
-	return os.Getenv("GH_TOKEN")
+	return strings.TrimSpace(os.Getenv("GH_TOKEN"))
 }
 
 // isGitHubHost returns true if the given URL points to a github.com or
