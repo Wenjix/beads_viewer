@@ -1351,7 +1351,7 @@ func main() {
 		issues, err = datasource.LoadIssues("")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading beads: %v\n", err)
-			fmt.Fprintln(os.Stderr, "Make sure you are in a project initialized with 'bd init'.")
+			fmt.Fprintln(os.Stderr, "Make sure you are in a project initialized with 'br init'.")
 			os.Exit(1)
 		}
 		// Get beads file path for live reload (respects BEADS_DIR env var)

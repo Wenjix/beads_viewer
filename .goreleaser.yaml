@@ -55,7 +55,7 @@ brews:
       system "#{bin}/bv", "--version"
     caveats: |
       To get started with bv:
-        1. Initialize beads in your project: bd init
+        1. Initialize beads in your project: br init
         2. Launch the TUI: bv
 
       For AI agent integration, use --robot-* flags:
