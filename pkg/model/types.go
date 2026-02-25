@@ -119,6 +119,7 @@ const (
 	StatusInProgress Status = "in_progress"
 	StatusBlocked    Status = "blocked"
 	StatusDeferred   Status = "deferred" // Deliberately put on ice for later
+	StatusDraft      Status = "draft"    // Being authored, not yet ready for execution
 	StatusPinned     Status = "pinned"   // Persistent bead that stays open indefinitely
 	StatusHooked     Status = "hooked"   // Work attached to an agent's hook (GUPP)
 	StatusReview     Status = "review"   // Awaiting review before completion
@@ -129,7 +130,7 @@ const (
 // IsValid returns true if the status is a recognized value
 func (s Status) IsValid() bool {
 	switch s {
-	case StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred,
+	case StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred, StatusDraft,
 		StatusPinned, StatusHooked, StatusReview, StatusClosed, StatusTombstone:
 		return true
 	}

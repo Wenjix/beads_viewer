@@ -50,6 +50,7 @@ type Theme struct {
 	Deferred   lipgloss.AdaptiveColor
 	Pinned     lipgloss.AdaptiveColor
 	Hooked     lipgloss.AdaptiveColor
+	Review     lipgloss.AdaptiveColor
 	Closed     lipgloss.AdaptiveColor
 	Tombstone  lipgloss.AdaptiveColor
 
@@ -102,6 +103,7 @@ func DefaultTheme(r *lipgloss.Renderer) Theme {
 		Deferred:   lipgloss.AdaptiveColor{Light: "#B06800", Dark: "#FFB86C"}, // Orange - on ice
 		Pinned:     lipgloss.AdaptiveColor{Light: "#0066CC", Dark: "#6699FF"}, // Blue - persistent
 		Hooked:     lipgloss.AdaptiveColor{Light: "#008080", Dark: "#00CED1"}, // Teal - agent-attached
+		Review:     lipgloss.AdaptiveColor{Light: "#6B47D9", Dark: "#BD93F9"}, // Purple - awaiting review
 		Closed:     lipgloss.AdaptiveColor{Light: "#555555", Dark: "#6272A4"}, // Gray
 		Tombstone:  lipgloss.AdaptiveColor{Light: "#888888", Dark: "#44475A"}, // Muted gray - deleted
 

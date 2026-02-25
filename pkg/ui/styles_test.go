@@ -34,13 +34,15 @@ func TestRenderStatusBadge(t *testing.T) {
 		status string
 		want   string
 	}{
-		// All 8 official beads statuses
+		// All official beads statuses
 		{"open", "OPEN"},
 		{"in_progress", "PROG"},
 		{"blocked", "BLKD"},
 		{"deferred", "DEFR"},
+		{"draft", "DRFT"},
 		{"pinned", "PIN"},
 		{"hooked", "HOOK"},
+		{"review", "REVW"},
 		{"closed", "DONE"},
 		{"tombstone", "TOMB"},
 		// Unknown status should show "????"
@@ -60,8 +62,8 @@ func TestRenderStatusBadge(t *testing.T) {
 // TestRenderStatusBadge_AllStatusesHaveColors verifies each status has distinct colors
 func TestRenderStatusBadge_AllStatusesHaveColors(t *testing.T) {
 	statuses := []string{
-		"open", "in_progress", "blocked", "deferred",
-		"pinned", "hooked", "closed", "tombstone",
+		"open", "in_progress", "blocked", "deferred", "draft",
+		"pinned", "hooked", "review", "closed", "tombstone",
 	}
 
 	// Each status should produce a non-empty output

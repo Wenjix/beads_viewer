@@ -27,7 +27,7 @@ func TestContainsBlurb(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "has blurb v2 (future)",
+			name:     "has blurb v2",
 			content:  "# My AGENTS.md\n\n<!-- bv-agent-instructions-v2 -->\nSome content\n<!-- end-bv-agent-instructions -->",
 			expected: true,
 		},
@@ -60,7 +60,7 @@ func TestGetBlurbVersion(t *testing.T) {
 			expected: 1,
 		},
 		{
-			name:     "version 2 (future)",
+			name:     "version 2",
 			content:  "<!-- bv-agent-instructions-v2 -->",
 			expected: 2,
 		},
@@ -177,8 +177,13 @@ func TestNeedsUpdate(t *testing.T) {
 		},
 		{
 			name:     "current version",
+			content:  "<!-- bv-agent-instructions-v2 -->",
+			expected: false, // v2 is current, no update needed
+		},
+		{
+			name:     "old v1 needs update",
 			content:  "<!-- bv-agent-instructions-v1 -->",
-			expected: false, // v1 is current, no update needed
+			expected: true, // v1 is old, needs update to v2
 		},
 	}
 
@@ -193,7 +198,7 @@ func TestNeedsUpdate(t *testing.T) {
 }
 
 func TestAgentBlurbContent(t *testing.T) {
-	// Verify blurb contains essential commands
+	// Verify blurb contains essential br AND bv commands
 	essentials := []string{
 		"br ready",
 		"br list",
@@ -203,6 +208,10 @@ func TestAgentBlurbContent(t *testing.T) {
 		"br close",
 		"br sync",
 		"br dep add",
+		"bv --robot-triage",
+		"bv --robot-next",
+		"bv --robot-plan",
+		"bv --robot-insights",
 	}
 
 	for _, cmd := range essentials {
@@ -421,9 +430,9 @@ func TestUpdateBlurbFromLegacy(t *testing.T) {
 		t.Error("UpdateBlurb() from legacy missing current blurb content")
 	}
 
-	// Should NOT have legacy content
-	if strings.Contains(result, "--robot-insights") {
-		t.Error("UpdateBlurb() from legacy still contains legacy content")
+	// Should NOT have legacy markers
+	if strings.Contains(result, "bv already computes the hard parts") {
+		t.Error("UpdateBlurb() from legacy still contains legacy end phrase")
 	}
 
 	// Should preserve header
@@ -444,7 +453,7 @@ func TestNeedsUpdateLegacy(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "current blurb no update",
+			name:     "current blurb v2 no update",
 			content:  "# AGENTS.md\n\n" + AgentBlurb,
 			expected: false,
 		},

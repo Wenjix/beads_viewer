@@ -1630,7 +1630,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					include = isClosedLikeStatus(issue.Status)
 				case "ready":
 					// Ready = Open/InProgress AND NO Open Blockers
-					if !isClosedLikeStatus(issue.Status) && issue.Status != model.StatusBlocked {
+					// Exclude draft/deferred - not ready for execution
+					if !isClosedLikeStatus(issue.Status) && issue.Status != model.StatusBlocked &&
+						issue.Status != model.StatusDraft && issue.Status != model.StatusDeferred {
 						isBlocked := false
 						for _, dep := range issue.Dependencies {
 							if dep == nil || !dep.Type.IsBlocking() {
@@ -6135,7 +6137,9 @@ func (m *Model) matchesCurrentFilter(issue model.Issue) bool {
 		return isClosedLikeStatus(issue.Status)
 	case "ready":
 		// Ready = Open/InProgress AND NO Open Blockers
-		if isClosedLikeStatus(issue.Status) || issue.Status == model.StatusBlocked {
+		// Exclude draft/deferred - not ready for execution
+		if isClosedLikeStatus(issue.Status) || issue.Status == model.StatusBlocked ||
+			issue.Status == model.StatusDraft || issue.Status == model.StatusDeferred {
 			return false
 		}
 		for _, dep := range issue.Dependencies {

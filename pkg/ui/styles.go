@@ -148,6 +148,8 @@ func RenderStatusBadge(status string) string {
 		fg, bg, label = ColorStatusBlocked, ColorStatusBlockedBg, "BLKD"
 	case "deferred":
 		fg, bg, label = ColorStatusDeferred, ColorStatusDeferredBg, "DEFR"
+	case "draft":
+		fg, bg, label = ColorStatusDeferred, ColorStatusDeferredBg, "DRFT"
 	case "pinned":
 		fg, bg, label = ColorStatusPinned, ColorStatusPinnedBg, "PIN"
 	case "hooked":

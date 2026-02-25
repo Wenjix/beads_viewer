@@ -884,12 +884,14 @@ func getStatusIcon(status model.Status) string {
 		return "🟡"
 	case status == model.StatusBlocked:
 		return "🔴"
-	case status == model.StatusDeferred:
+	case status == model.StatusDeferred || status == model.StatusDraft:
 		return "⏸️"
 	case status == model.StatusPinned:
 		return "📌"
 	case status == model.StatusHooked:
 		return "🪝"
+	case status == model.StatusReview:
+		return "👁️"
 	default:
 		return "⚪"
 	}
@@ -903,12 +905,14 @@ func getStatusColor(status model.Status, t Theme) lipgloss.AdaptiveColor {
 		return t.InProgress
 	case model.StatusBlocked:
 		return t.Blocked
-	case model.StatusDeferred:
+	case model.StatusDeferred, model.StatusDraft:
 		return t.Deferred
 	case model.StatusPinned:
 		return t.Pinned
 	case model.StatusHooked:
 		return t.Hooked
+	case model.StatusReview:
+		return t.Review
 	case model.StatusClosed:
 		return t.Closed
 	case model.StatusTombstone:
