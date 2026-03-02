@@ -57,6 +57,38 @@ func (r *SQLiteReader) Close() error {
 	return nil
 }
 
+// hasLabelsColumn checks whether the issues table has a "labels" column.
+// beads-rs (br) stores labels in a separate table instead.
+func (r *SQLiteReader) hasLabelsColumn() bool {
+	rows, err := r.db.Query("PRAGMA table_info(issues)")
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt interface{}
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			continue
+		}
+		if strings.EqualFold(name, "labels") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasLabelsTable checks whether a separate "labels" table exists.
+// beads-rs (br) databases use this schema instead of a JSON column on issues.
+func (r *SQLiteReader) hasLabelsTable() bool {
+	var name string
+	err := r.db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='labels'").Scan(&name)
+	return err == nil && name == "labels"
+}
+
 // LoadIssues reads all issues from the database
 func (r *SQLiteReader) LoadIssues() ([]model.Issue, error) {
 	return r.LoadIssuesFiltered(nil)
@@ -64,18 +96,27 @@ func (r *SQLiteReader) LoadIssues() ([]model.Issue, error) {
 
 // LoadIssuesFiltered reads issues matching the filter function
 func (r *SQLiteReader) LoadIssuesFiltered(filter func(*model.Issue) bool) ([]model.Issue, error) {
-	// Query for all non-tombstone issues
-	query := `
+	// Detect schema: beads-rs (br) databases store labels in a separate
+	// "labels" table rather than a JSON column on "issues". We substitute
+	// a subquery so that labels are loaded transparently.
+	labelsExpr := "i.labels"
+	if !r.hasLabelsColumn() && r.hasLabelsTable() {
+		labelsExpr = "(SELECT json_group_array(label) FROM labels WHERE issue_id = i.id)"
+	}
+
+	// Query for all non-tombstone issues. Use table alias "i" to avoid
+	// column ambiguity when a labels subquery references issue_id.
+	query := fmt.Sprintf(`
 		SELECT
-			id, title, description, status, priority, issue_type,
-			assignee, estimated_minutes, created_at, updated_at,
-			due_date, closed_at, external_ref, compaction_level,
-			compacted_at, compacted_at_commit, original_size,
-			labels, design, acceptance_criteria, notes, source_repo
-		FROM issues
-		WHERE (tombstone IS NULL OR tombstone = 0)
-		ORDER BY updated_at DESC
-	`
+			i.id, i.title, i.description, i.status, i.priority, i.issue_type,
+			i.assignee, i.estimated_minutes, i.created_at, i.updated_at,
+			i.due_date, i.closed_at, i.external_ref, i.compaction_level,
+			i.compacted_at, i.compacted_at_commit, i.original_size,
+			%s, i.design, i.acceptance_criteria, i.notes, i.source_repo
+		FROM issues i
+		WHERE (i.tombstone IS NULL OR i.tombstone = 0)
+		ORDER BY i.updated_at DESC
+	`, labelsExpr)
 
 	rows, err := r.db.Query(query)
 	if err != nil {
@@ -202,6 +243,9 @@ func (r *SQLiteReader) loadIssuesSimple(filter func(*model.Issue) bool) ([]model
 	}
 	defer rows.Close()
 
+	// Check once whether a separate labels table exists (beads-rs schema)
+	separateLabels := r.hasLabelsTable()
+
 	var issues []model.Issue
 	for rows.Next() {
 		var issue model.Issue
@@ -228,6 +272,11 @@ func (r *SQLiteReader) loadIssuesSimple(filter func(*model.Issue) bool) ([]model
 			issue.UpdatedAt = updatedAt.Time
 		}
 
+		// Load labels from separate table if present (beads-rs compatibility)
+		if separateLabels {
+			issue.Labels = r.loadLabelsFromTable(issue.ID)
+		}
+
 		if filter != nil && !filter(&issue) {
 			continue
 		}
@@ -239,6 +288,26 @@ func (r *SQLiteReader) loadIssuesSimple(filter func(*model.Issue) bool) ([]model
 	}
 
 	return issues, nil
+}
+
+// loadLabelsFromTable loads labels for an issue from the separate labels table
+// used by beads-rs (br) databases.
+func (r *SQLiteReader) loadLabelsFromTable(issueID string) []string {
+	rows, err := r.db.Query("SELECT label FROM labels WHERE issue_id = ?", issueID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var labels []string
+	for rows.Next() {
+		var label string
+		if err := rows.Scan(&label); err != nil {
+			continue
+		}
+		labels = append(labels, label)
+	}
+	return labels
 }
 
 // loadDependencies loads dependencies for an issue
