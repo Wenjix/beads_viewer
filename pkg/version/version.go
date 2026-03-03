@@ -20,10 +20,21 @@ const fallback = "v0.14.4"
 var Version string
 
 func init() {
+	// Resolve version from the first source that yields a usable value.
+	//
+	// Prior to this fix, GoReleaser injected into the *exported* Version
+	// variable directly.  When {{.Version}} resolved to an empty string
+	// (e.g. snapshot builds or CI misconfiguration), Version was silently
+	// set to "" and no fallback fired.  The v0.14.4 release shipped with
+	// this bug — "bv --version" printed just "bv".
+	//
+	// The fix: inject into the *unexported* `version` variable, validate
+	// the injected value, and always fall through to the hardcoded
+	// fallback as a last resort so Version is never empty.
 	switch {
-	case version != "":
+	case isUsableVersion(version):
 		// 1. Build-time ldflags injection (GoReleaser, Nix, manual).
-		Version = version
+		Version = normalizeVersion(version)
 	case versionFromBuildInfo() != "":
 		// 2. Module version from "go install ...@vX.Y.Z".
 		Version = versionFromBuildInfo()
@@ -31,6 +42,32 @@ func init() {
 		// 3. Hardcoded fallback (always available, manually bumped per release).
 		Version = fallback
 	}
+
+	// Defensive guarantee: Version must never be empty regardless of how
+	// the above branches resolve.  This prevents a repeat of #126.
+	if Version == "" {
+		Version = fallback
+	}
+}
+
+// isUsableVersion returns true if v looks like an actual version string
+// rather than an empty/whitespace-only/bare-prefix injection artifact.
+func isUsableVersion(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" || v == "v" || v == "v." {
+		return false
+	}
+	return true
+}
+
+// normalizeVersion ensures the version string has a "v" prefix and no
+// surrounding whitespace.
+func normalizeVersion(v string) string {
+	v = strings.TrimSpace(v)
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	return v
 }
 
 // versionFromBuildInfo extracts the module version stamped by the Go toolchain
