@@ -61,7 +61,7 @@ func RenderContextHelp(ctx Context, theme Theme, width, height int) string {
 
 	// Footer hint
 	footerStyle := r.NewStyle().
-		Foreground(theme.Muted).
+		Foreground(ColorFooterHint).
 		Italic(true)
 
 	// Build content

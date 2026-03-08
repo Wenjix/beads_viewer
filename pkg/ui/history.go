@@ -2409,7 +2409,7 @@ func (h *HistoryModel) renderDetailPanel(width, height int) string {
 	lines = append(lines, statsLine)
 
 	// Navigation hint (bv-xf4p: added o and g keys)
-	hintStyle := t.Renderer.NewStyle().Foreground(t.Muted).Italic(true)
+	hintStyle := t.Renderer.NewStyle().Foreground(ColorFooterHint).Italic(true)
 	lines = append(lines, hintStyle.Render("J/K:nav  y:copy  o:open  g:graph"))
 
 	content := strings.Join(lines, "\n")
@@ -3241,7 +3241,7 @@ func (h *HistoryModel) renderGitDetailPanel(width, height int) string {
 
 	// Add footer hint (bv-xf4p)
 	lines = append(lines, strings.Repeat("─", detailSepWidth))
-	hintStyle := t.Renderer.NewStyle().Foreground(t.Muted).Italic(true)
+	hintStyle := t.Renderer.NewStyle().Foreground(ColorFooterHint).Italic(true)
 	lines = append(lines, hintStyle.Render("J/K:bead  y:copy  o:open  g:graph"))
 
 	content := strings.Join(lines, "\n")

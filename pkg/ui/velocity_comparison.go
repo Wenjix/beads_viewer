@@ -320,7 +320,7 @@ func (m *VelocityComparisonModel) View() string {
 
 	// Footer hints
 	footerStyle := t.Renderer.NewStyle().
-		Foreground(t.Secondary).
+		Foreground(ColorFooterHint).
 		Italic(true)
 	sb.WriteString("\n")
 	sb.WriteString(footerStyle.Render("j/k: navigate | enter: filter by label | esc: back"))

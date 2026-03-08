@@ -157,7 +157,7 @@ func (m *RepoPickerModel) View() string {
 
 	lines = append(lines, "")
 	footerStyle := t.Renderer.NewStyle().
-		Foreground(t.Secondary).
+		Foreground(ColorFooterHint).
 		Italic(true)
 	lines = append(lines, footerStyle.Render("j/k: navigate • space: toggle • a: all • enter: apply • esc: cancel"))
 

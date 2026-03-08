@@ -216,7 +216,7 @@ func (s *ShortcutsSidebar) View() string {
 		Foreground(t.Base.GetForeground())
 
 	dimStyle := t.Renderer.NewStyle().
-		Foreground(t.Secondary).
+		Foreground(ColorFooterHint).
 		Italic(true)
 
 	// Build content

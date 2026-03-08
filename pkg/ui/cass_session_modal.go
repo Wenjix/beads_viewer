@@ -123,7 +123,7 @@ func (m CassSessionModal) View() string {
 		Width(m.width - 10)
 
 	footerStyle := r.NewStyle().
-		Foreground(m.theme.Subtext).
+		Foreground(ColorFooterHint).
 		Italic(true)
 
 	// Build content

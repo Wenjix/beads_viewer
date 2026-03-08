@@ -564,10 +564,10 @@ func (m TutorialModel) renderFooter(totalPages int) string {
 		Foreground(m.theme.Primary)
 
 	descStyle := r.NewStyle().
-		Foreground(m.theme.Subtext)
+		Foreground(ColorFooterHint)
 
 	sepStyle := r.NewStyle().
-		Foreground(m.theme.Muted)
+		Foreground(ColorFooterSep)
 
 	var hints []string
 

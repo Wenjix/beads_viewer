@@ -316,7 +316,7 @@ func (m *LabelPickerModel) View() string {
 	// Footer with keybindings
 	lines = append(lines, "")
 	footerStyle := t.Renderer.NewStyle().
-		Foreground(t.Secondary).
+		Foreground(ColorFooterHint).
 		Italic(true)
 	lines = append(lines, footerStyle.Render("j/k: navigate | enter: apply | esc: cancel"))
 

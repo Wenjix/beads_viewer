@@ -5535,7 +5535,7 @@ func (m *Model) renderFooter() string {
 	}
 
 	labelHint := lipgloss.NewStyle().
-		Foreground(ColorMuted).
+		Foreground(ColorFooterHint).
 		Padding(0, 1).
 		Render("L:labels • h:detail")
 
@@ -5548,7 +5548,7 @@ func (m *Model) renderFooter() string {
 				matchInfo = fmt.Sprintf(" [%d/%d]", m.board.SearchCursorPos(), m.board.SearchMatchCount())
 			}
 			labelHint = lipgloss.NewStyle().
-				Foreground(ColorMuted).
+				Foreground(ColorFooterHint).
 				Padding(0, 1).
 				Render(fmt.Sprintf("/%s%s • n/N:match • enter:done • esc:cancel", m.board.SearchQuery(), matchInfo))
 		} else {
@@ -5560,13 +5560,13 @@ func (m *Model) renderFooter() string {
 				filterInfo = fmt.Sprintf("[%s:%d/%d] ", m.currentFilter, shown, total)
 			}
 			labelHint = lipgloss.NewStyle().
-				Foreground(ColorMuted).
+				Foreground(ColorFooterHint).
 				Padding(0, 1).
 				Render(fmt.Sprintf("%s1-4:col • o/c/r:filter • L:labels • /:search • ?:help", filterInfo))
 		}
 	} else if m.showAttentionView {
 		labelHint = lipgloss.NewStyle().
-			Foreground(ColorMuted).
+			Foreground(ColorFooterHint).
 			Padding(0, 1).
 			Render("A:attention • 1-9 filter • esc close")
 	}
@@ -5895,10 +5895,10 @@ func (m *Model) renderFooter() string {
 	// KEYBOARD HINTS - Context-aware navigation help
 	// ─────────────────────────────────────────────────────────────────────────
 	keyStyle := lipgloss.NewStyle().
-		Foreground(ColorSecondary).
-		Background(ColorBgSubtle).
+		Foreground(ColorFooterKey).
+		Bold(true).
 		Padding(0, 0)
-	sepStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	sepStyle := lipgloss.NewStyle().Foreground(ColorFooterSep)
 	sep := sepStyle.Render(" │ ")
 
 	var keyHints []string
@@ -5953,7 +5953,7 @@ func (m *Model) renderFooter() string {
 	}
 
 	keysSection := lipgloss.NewStyle().
-		Foreground(ColorSubtext).
+		Foreground(ColorFooterHint).
 		Padding(0, 1).
 		Render(strings.Join(keyHints, sep))
 
@@ -5961,7 +5961,7 @@ func (m *Model) renderFooter() string {
 	// COUNT BADGE - Total issues displayed
 	// ─────────────────────────────────────────────────────────────────────────
 	countBadge := lipgloss.NewStyle().
-		Foreground(ColorSecondary).
+		Foreground(ColorFooterDim).
 		Padding(0, 1).
 		Render(fmt.Sprintf("%d issues", len(m.list.Items())))
 

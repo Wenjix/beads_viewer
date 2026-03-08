@@ -2,6 +2,7 @@ package ui
 
 import (
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/lipgloss"
@@ -11,8 +12,20 @@ import (
 // package init so every style helper can branch without re-detecting.
 var TermProfile colorprofile.Profile
 
+// BVThemeOverride holds the user's explicit theme preference from BV_THEME.
+// Values: "" (auto-detect), "dark", "light".
+var BVThemeOverride string
+
 func init() {
 	TermProfile = colorprofile.Detect(os.Stdout, os.Environ())
+
+	// BV_THEME allows users to override auto-detection of light/dark background.
+	// This is useful when the terminal reports the wrong background color or
+	// when using themes that confuse auto-detection (e.g., Windows Terminal
+	// custom schemes, tmux, SSH). (bv-128)
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("BV_THEME"))); v == "light" || v == "dark" {
+		BVThemeOverride = v
+	}
 }
 
 // ThemeBg returns the given hex color for TrueColor terminals and
@@ -86,8 +99,13 @@ type Theme struct {
 	TriageUnblocksAlt lipgloss.Style // Secondary unblocks ↪
 }
 
-// DefaultTheme returns the standard Dracula-inspired theme (adaptive)
+// DefaultTheme returns the standard Dracula-inspired theme (adaptive).
+// Respects BV_THEME=light|dark to override background detection. (bv-128)
 func DefaultTheme(r *lipgloss.Renderer) Theme {
+	// Apply BV_THEME override so AdaptiveColor picks the right variant
+	if r != nil && BVThemeOverride != "" {
+		r.SetHasDarkBackground(BVThemeOverride == "dark")
+	}
 	t := Theme{
 		Renderer: r,
 

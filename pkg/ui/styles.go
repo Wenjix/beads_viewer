@@ -83,6 +83,14 @@ var (
 	ColorTypeTask    = lipgloss.AdaptiveColor{Light: "#808000", Dark: "#F1FA8C"}
 	ColorTypeEpic    = lipgloss.AdaptiveColor{Light: "#6B47D9", Dark: "#BD93F9"}
 	ColorTypeChore   = lipgloss.AdaptiveColor{Light: "#006080", Dark: "#8BE9FD"}
+
+	// Footer colors - higher contrast for legibility across terminal themes (bv-128)
+	// Uses brighter values than body text so the footer status bar is always readable.
+	// On dark backgrounds: brighter text; on light backgrounds: darker text.
+	ColorFooterHint = lipgloss.AdaptiveColor{Light: "#444444", Dark: "#C8C8D0"} // Navigation hints
+	ColorFooterKey  = lipgloss.AdaptiveColor{Light: "#333333", Dark: "#E0E0E8"} // Key labels (bold)
+	ColorFooterSep  = lipgloss.AdaptiveColor{Light: "#888888", Dark: "#8888A0"} // Separators between hints
+	ColorFooterDim  = lipgloss.AdaptiveColor{Light: "#555555", Dark: "#A0A0B8"} // Issue count, secondary info
 )
 
 // ══════════════════════════════════════════════════════════════════════════════
