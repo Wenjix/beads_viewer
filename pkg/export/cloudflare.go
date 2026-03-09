@@ -118,23 +118,45 @@ func CheckWranglerStatus() (*CloudflareStatus, error) {
 }
 
 // checkWranglerConfigFile checks if a valid wrangler OAuth config file exists.
-// Wrangler stores credentials in ~/.config/.wrangler/config/default.toml.
+// Wrangler stores credentials in different locations depending on version:
+//   - ~/.wrangler/config/default.toml (wrangler v3+)
+//   - ~/.config/.wrangler/config/default.toml (some installations)
+//   - $XDG_CONFIG_HOME/.wrangler/config/default.toml (XDG-aware)
 func checkWranglerConfigFile() bool {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return false
 	}
-	configPath := filepath.Join(home, ".config", ".wrangler", "config", "default.toml")
-	data, err := os.ReadFile(configPath)
+
+	// Build list of candidate paths (checked in order).
+	candidates := []string{
+		filepath.Join(home, ".wrangler", "config", "default.toml"),
+		filepath.Join(home, ".config", ".wrangler", "config", "default.toml"),
+	}
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		candidates = append(candidates, filepath.Join(xdg, ".wrangler", "config", "default.toml"))
+	}
+
+	for _, configPath := range candidates {
+		if validWranglerConfig(configPath) {
+			return true
+		}
+	}
+	return false
+}
+
+// validWranglerConfig reads a wrangler config TOML and returns true if it
+// contains an oauth_token that hasn't expired (or has a refresh_token).
+func validWranglerConfig(path string) bool {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}
 	content := string(data)
-	// Check for oauth_token and that it hasn't obviously expired
 	if !strings.Contains(content, "oauth_token") {
 		return false
 	}
-	// Check expiration if present
+	hasRefreshToken := strings.Contains(content, "refresh_token")
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "expiration_time") {
@@ -142,8 +164,8 @@ func checkWranglerConfigFile() bool {
 			if len(parts) == 2 {
 				timeStr := strings.Trim(strings.TrimSpace(parts[1]), "\"")
 				expiry, err := time.Parse(time.RFC3339, timeStr)
-				if err == nil && time.Now().After(expiry) {
-					return false // Token expired
+				if err == nil && time.Now().After(expiry) && !hasRefreshToken {
+					return false // Token expired and no refresh token
 				}
 			}
 		}
